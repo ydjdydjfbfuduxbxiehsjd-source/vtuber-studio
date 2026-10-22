@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 
-const PORT = process.env.PORT || 5173;
+let currentPort = Number(process.env.PORT) || 5173;
 const DIST_DIR = path.join(__dirname, 'dist');
 
 const MIME_TYPES = {
@@ -30,7 +30,7 @@ const MIME_TYPES = {
 };
 
 if (!fs.existsSync(DIST_DIR)) {
-  console.error('[??????] ????? dist ?? ???????! ????????? ?????? ???????: npm run build');
+  console.error('[ERROR] dist folder not found! Please build the project: npm run build');
   process.exit(1);
 }
 
@@ -101,26 +101,35 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, 'localhost', () => {
-  const url = `http://localhost:${PORT}/`;
-  console.log('============================================================');
-  console.log('   VTuber Studio Pro ? ?????? ??????? ???????!');
-  console.log('============================================================');
-  console.log(`   ????? ? ????????: ${url}`);
-  console.log('   ??? ????????? ??????? Ctrl+C ? ???? ????');
-  console.log('============================================================\n');
+function startServer(port) {
+  server.listen(port, 'localhost', () => {
+    const actualPort = server.address().port;
+    const url = `http://localhost:${actualPort}/`;
+    console.log('============================================================');
+    console.log('   VTuber Studio Pro - Web Edition');
+    console.log('============================================================');
+    console.log(`   Running at: ${url}`);
+    console.log('   Press Ctrl+C in this console to stop');
+    console.log('============================================================\n');
 
-  // Auto open browser
-  const startCmd = process.platform === 'win32' ? `start "" "${url}"` :
-                   process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
-  exec(startCmd);
-});
+    const startCmd = process.platform === 'win32' ? `start "" "${url}"` :
+                     process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
+    exec(startCmd);
+  });
+}
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.log(`???? ${PORT} ?????, ??????? ${PORT + 1}...`);
-    server.listen(PORT + 1, 'localhost');
+    currentPort++;
+    if (currentPort < 5200) {
+      console.log(`Port is in use, trying ${currentPort}...`);
+      startServer(currentPort);
+    } else {
+      console.error('All ports in range 5173-5200 are in use.');
+    }
   } else {
     console.error('Server error:', err);
   }
 });
+
+startServer(currentPort);
