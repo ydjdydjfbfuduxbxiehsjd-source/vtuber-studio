@@ -580,6 +580,75 @@ let lastValidRightHandLM: any[] | null = null;
 let lastValidLeftHandLM: any[] | null = null;
 const HAND_HYSTERESIS_MS = 250;
 
+// Pose Landmark Visibility Caching Filter (falls back to last good coordinate if visibility < 0.5)
+interface CachedJoint {
+  x: number;
+  y: number;
+  z: number;
+}
+const lastGoodPoseLandmarks: Record<number, CachedJoint> = {};
+
+function getValidPoseLandmark(index: number, rawPl: any[] | null | undefined, rawWl: any[] | null | undefined): CachedJoint {
+  const pCheck = rawPl && rawPl[index];
+  const wPoint = (rawWl && rawWl[index]) || pCheck;
+  const vis = pCheck?.visibility ?? 1.0;
+
+  if (wPoint && vis >= 0.5) {
+    lastGoodPoseLandmarks[index] = { x: wPoint.x, y: wPoint.y, z: wPoint.z };
+    return lastGoodPoseLandmarks[index];
+  }
+
+  if (lastGoodPoseLandmarks[index]) {
+    return lastGoodPoseLandmarks[index];
+  }
+
+  if (wPoint) {
+    return { x: wPoint.x, y: wPoint.y, z: wPoint.z };
+  }
+
+  return { x: 0, y: 0, z: 0 };
+}
+
+// Avatar Shoulder Width & Rolling Median Scale Filter (0.8 - 1.3)
+function getAvatarShoulderWidth(): number {
+  if (!currentVrm || !currentVrm.humanoid) return 0.32;
+  const lShoulder = currentVrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+  const rShoulder = currentVrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+  if (lShoulder && rShoulder) {
+    const pL = new THREE.Vector3();
+    const pR = new THREE.Vector3();
+    lShoulder.getWorldPosition(pL);
+    rShoulder.getWorldPosition(pR);
+    const dist = pL.distanceTo(pR);
+    if (dist > 0.15 && dist < 0.8) return dist;
+  }
+  return 0.32;
+}
+
+const shoulderSamples: number[] = [];
+const MAX_SHOULDER_SAMPLES = 75; // ~2 seconds of history at 35-60 FPS
+let calibratedArmScale: number | null = null;
+
+function computeArmScale(userShoulderWidth: number): number {
+  if (calibratedArmScale !== null) {
+    return calibratedArmScale;
+  }
+  if (userShoulderWidth > 0.08 && userShoulderWidth < 1.5) {
+    shoulderSamples.push(userShoulderWidth);
+    if (shoulderSamples.length > MAX_SHOULDER_SAMPLES) {
+      shoulderSamples.shift();
+    }
+  }
+  let medianWidth = userShoulderWidth;
+  if (shoulderSamples.length > 0) {
+    const sorted = [...shoulderSamples].sort((a, b) => a - b);
+    medianWidth = sorted[Math.floor(sorted.length / 2)];
+  }
+  const avatarWidth = getAvatarShoulderWidth();
+  const rawScale = avatarWidth / (medianWidth > 1e-4 ? medianWidth : 0.32);
+  return THREE.MathUtils.clamp(rawScale, 0.8, 1.3);
+}
+
 function solveArmVectorIK(
   targetSide: 'left' | 'right',
   S3d: { x: number; y: number; z: number },
@@ -587,7 +656,8 @@ function solveArmVectorIK(
   W3d: { x: number; y: number; z: number },
   handLM: any[] | null | undefined,
   _isUserRight: boolean,
-  _faceLM?: any[] | null
+  faceLM?: any[] | null,
+  armScale: number = 1.0
 ) {
   if (!currentVrm || !currentVrm.humanoid) return;
 
@@ -604,52 +674,112 @@ function solveArmVectorIK(
   const shoulderPos = new THREE.Vector3();
   upperBone.getWorldPosition(shoulderPos);
 
-  // 1. Arm Lengths & Scaling (Avatar / User)
+  // 1. Arm segment lengths (avatar metric scale)
   const L1_avatar = 0.22;
   const L2_avatar = 0.215;
   const L_avatar = L1_avatar + L2_avatar;
 
-  const userL1 = Math.hypot(E3d.x - S3d.x, E3d.y - S3d.y, E3d.z - S3d.z);
-  const userL2 = Math.hypot(W3d.x - E3d.x, W3d.y - E3d.y, W3d.z - E3d.z);
-  const userArmLen = Math.max(0.12, userL1 + userL2);
-
-  // Scale target reaching vector so user reaching their face guarantees avatar reaches its face
-  const armScale = THREE.MathUtils.clamp(L_avatar / userArmLen, 0.65, 1.85);
-
-  // 2. Position-based Target Wrist (Scaled from User Shoulder-to-Wrist)
+  // 2. Position-based Target Wrist from Shoulder with Dampened Z (0.35x)
+  // X and Y drive the primary screen position; Z foreshortening is dampened to prevent distortion
   const vUserWrist = new THREE.Vector3(
     (W3d.x - S3d.x) * mirrorX,
     -(W3d.y - S3d.y),
-    -(W3d.z - S3d.z)
+    -(W3d.z - S3d.z) * 0.35
   );
   if (vUserWrist.lengthSq() < 1e-6) vUserWrist.set(isLeft ? 0.25 : -0.25, -0.4, 0.1);
 
-  const targetWristPos = shoulderPos.clone().addScaledVector(vUserWrist, armScale);
+  // Scaled by shoulder width ratio (range: 0.8 - 1.3)
+  let targetWristPos = shoulderPos.clone().addScaledVector(vUserWrist, armScale);
 
-  // Body collision on wrist (isWristOrHand = true skips head sphere collision so hand can reach cheeks/face!)
+  // 3. FACE-TOUCH MODE:
+  // If 2D wrist from Hands is close to nose or forehead from Face Mesh (<= 0.28 face height),
+  // target wrist attaches directly to the avatar's head bone + relative face displacement!
+  if (faceLM && faceLM.length >= 468 && handLM && handLM.length === 21) {
+    const nose = faceLM[1];
+    const forehead = faceLM[10];
+    const chin = faceLM[152];
+    const leftCheek = faceLM[454];
+    const rightCheek = faceLM[234];
+
+    const faceH = Math.max(0.12, Math.abs(chin.y - forehead.y));
+    const faceW = Math.max(0.08, Math.abs(leftCheek.x - rightCheek.x));
+    const faceThreshold = faceH * 0.28;
+
+    const p0 = handLM[0];
+    const p9 = handLM[9];
+    const pCenter = { x: (p0.x + p9.x) / 2, y: (p0.y + p9.y) / 2 };
+
+    const dNose = Math.min(
+      Math.hypot(p0.x - nose.x, p0.y - nose.y),
+      Math.hypot(pCenter.x - nose.x, pCenter.y - nose.y)
+    );
+    const dForehead = Math.min(
+      Math.hypot(p0.x - forehead.x, p0.y - forehead.y),
+      Math.hypot(pCenter.x - forehead.x, pCenter.y - forehead.y)
+    );
+    const dChin = Math.hypot(p0.x - chin.x, p0.y - chin.y);
+    const dCheek = Math.hypot(
+      p0.x - (isLeft ? rightCheek.x : leftCheek.x),
+      p0.y - (isLeft ? rightCheek.y : leftCheek.y)
+    );
+
+    const minDistToFace = Math.min(dNose, dForehead, dChin, dCheek);
+
+    if (minDistToFace < faceThreshold) {
+      const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
+      if (headNode) {
+        const headPos = new THREE.Vector3();
+        const headQuat = new THREE.Quaternion();
+        headNode.getWorldPosition(headPos);
+        headNode.getWorldQuaternion(headQuat);
+
+        const faceMidY = (forehead.y + chin.y) / 2;
+        const relX = (p0.x - nose.x) / faceW;
+        const relY = (p0.y - faceMidY) / faceH;
+
+        // Position on the surface of the forehead/face (+0.095m forward)
+        const localHeadOffset = new THREE.Vector3(
+          relX * mirrorX * 0.12,
+          -relY * 0.14 - 0.01,
+          0.095
+        );
+        const headWristTarget = headPos.clone().add(localHeadOffset.applyQuaternion(headQuat));
+
+        // Smoothly blend into face contact position
+        const faceTouchWeight = THREE.MathUtils.clamp(
+          (faceThreshold - minDistToFace) / (faceThreshold * 0.5),
+          0,
+          1
+        );
+        targetWristPos.lerp(headWristTarget, faceTouchWeight);
+      }
+    }
+  }
+
+  // Body collision resolution on wrist (isWristOrHand = true bypasses head sphere)
   const resolvedWristPos = settings.armCollision
     ? resolveBodyColliders(targetWristPos, 0.02, true)
     : targetWristPos;
 
-  // Reach vector from shoulder to resolved target wrist
+  // 4. Reach vector and distance clamping (max 0.98 * (L1 + L2) to prevent locking!)
   const vReach = new THREE.Vector3().subVectors(resolvedWristPos, shoulderPos);
   const reachDist = vReach.length();
-  const maxReach = L_avatar * 0.998;
+  const maxReach = L_avatar * 0.98; // 0.98 * (L1 + L2)
   const dClamped = THREE.MathUtils.clamp(reachDist, 0.03, maxReach);
 
   const dTarget = reachDist > 1e-6
     ? vReach.clone().multiplyScalar(1 / reachDist)
     : new THREE.Vector3(isLeft ? 0.3 : -0.3, -0.8, 0).normalize();
 
-  // 3. Law of Cosines for Shoulder Angle (alpha)
+  // 5. Law of Cosines for Shoulder Angle (alpha)
   const cosAlpha = (L1_avatar * L1_avatar + dClamped * dClamped - L2_avatar * L2_avatar) / (2 * L1_avatar * dClamped);
   const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
 
-  // 4. Elbow Direction from MediaPipe Pose
+  // 6. Elbow Direction from MediaPipe Pose (with dampened Z)
   const vUserElbow = new THREE.Vector3(
     (E3d.x - S3d.x) * mirrorX,
     -(E3d.y - S3d.y),
-    -(E3d.z - S3d.z)
+    -(E3d.z - S3d.z) * 0.35 // Dampened Z coordinate (0.3 - 0.5)
   );
   if (vUserElbow.lengthSq() < 1e-6) vUserElbow.set(isLeft ? 0.3 : -0.3, -0.7, -0.2);
 
@@ -679,7 +809,7 @@ function solveArmVectorIK(
   // Forearm vector: from elbow to resolved wrist
   const dForearm = new THREE.Vector3().subVectors(resolvedWristPos, resolvedElbowPos).normalize();
 
-  // 5. Apply Bone Rotations
+  // 7. Apply Bone Rotations
   const qUpperTarget = new THREE.Quaternion().setFromUnitVectors(vRest, dUpper);
   upperBone.quaternion.slerp(qUpperTarget, slerpRate);
 
@@ -690,7 +820,7 @@ function solveArmVectorIK(
   const qLowerTarget = new THREE.Quaternion().setFromUnitVectors(vRest, vLocalForearm);
   lowerBone.quaternion.slerp(qLowerTarget, slerpRate);
 
-  // 6. Direct Wrist Orientation (Orthonormal Basis from Hand Landmarks)
+  // 8. Direct Wrist Orientation (Orthonormal Basis from Hand Landmarks)
   if (handLM && handLM.length === 21) {
     const p0 = handLM[0];
     const p5 = handLM[5];
@@ -737,7 +867,7 @@ function solveArmVectorIK(
     handBone.quaternion.slerp(new THREE.Quaternion(), 0.1);
   }
 
-  // 7. Direct 5-Finger Tracking (All 21 Landmarks)
+  // 9. Direct 5-Finger Tracking (All 21 Landmarks)
   if (handLM && handLM.length === 21) {
     const fingerDefs = [
       { name: 'Thumb', joints: [1, 2, 3, 4], isThumb: true },
@@ -1075,13 +1205,19 @@ function onHolisticResults(results: any) {
     }
   }
 
-  // 3. FULL 3D TORSO TRACKING (Spine, Chest, Hips Sway)
+  // 3. FULL 3D TORSO TRACKING & VISIBILITY FILTERING
   const pl = results.poseLandmarks;
-  if (pl && pl[11] && pl[12]) {
-    const s11 = pl[11];
-    const s12 = pl[12];
+  const wl = results.ea || results.poseWorldLandmarks || pl;
+
+  if (pl && (pl[11] || pl[12])) {
+    const s11 = getValidPoseLandmark(11, pl, wl);
+    const s12 = getValidPoseLandmark(12, pl, wl);
     const sMidX = (s11.x + s12.x) / 2;
     const sMidY = (s11.y + s12.y) / 2;
+
+    // Shoulder width in coronal plane & rolling median scale (0.8 - 1.3)
+    const userShoulderWidth = Math.hypot(s12.x - s11.x, s12.y - s11.y, (s12.z - s11.z) * 0.4);
+    const armScale = computeArmScale(userShoulderWidth);
 
     if (settings.torso) {
       const tSens = settings.torsoSens;
@@ -1130,7 +1266,6 @@ function onHolisticResults(results: any) {
     }
 
     // 4. VECTOR IK ARMS (3D World Landmarks + Full 3D Wrist Orientation)
-    const wl = results.ea || results.poseWorldLandmarks || pl;
 
     if (settings.hands) {
       const targetRightArm = settings.mirror ? 'left' : 'right';
@@ -1181,9 +1316,15 @@ function onHolisticResults(results: any) {
         }, 1, 0.25);
       }
 
+      // Visibility-filtered joint coordinates
+      const e13 = getValidPoseLandmark(13, pl, wl);
+      const e14 = getValidPoseLandmark(14, pl, wl);
+      const w15 = getValidPoseLandmark(15, pl, wl);
+      const w16 = getValidPoseLandmark(16, pl, wl);
+
       // User Right Arm
-      if (settings.rightHand && isRightActive && wl[12] && wl[14] && wl[16]) {
-        solveArmVectorIK(targetRightArm, wl[12], wl[14], wl[16], activeRightHandLM, true, results.faceLandmarks);
+      if (settings.rightHand && isRightActive) {
+        solveArmVectorIK(targetRightArm, s12, e14, w16, activeRightHandLM, true, results.faceLandmarks, armScale);
         updateHandBadge(rightHandBadge, true);
       } else {
         lastValidRightHandLM = null;
@@ -1192,8 +1333,8 @@ function onHolisticResults(results: any) {
       }
 
       // User Left Arm
-      if (settings.leftHand && isLeftActive && wl[11] && wl[13] && wl[15]) {
-        solveArmVectorIK(targetLeftArm, wl[11], wl[13], wl[15], activeLeftHandLM, false, results.faceLandmarks);
+      if (settings.leftHand && isLeftActive) {
+        solveArmVectorIK(targetLeftArm, s11, e13, w15, activeLeftHandLM, false, results.faceLandmarks, armScale);
         updateHandBadge(leftHandBadge, true);
       } else {
         lastValidLeftHandLM = null;
@@ -1369,6 +1510,27 @@ function updateAudioLipSync() {
    UI EVENT HANDLERS
    ========================================================================== */
 const cameraBtn = document.getElementById('btn-start-camera')!;
+const btnCalibrate = document.getElementById('btn-calibrate-scale');
+if (btnCalibrate) {
+  btnCalibrate.addEventListener('click', () => {
+    if (!isCameraRunning) {
+      showEmotionToast('??', '??????????', '??????? ????????? ??????');
+      return;
+    }
+    if (shoulderSamples.length >= 5) {
+      const sorted = [...shoulderSamples].sort((a, b) => a - b);
+      const medianWidth = sorted[Math.floor(sorted.length / 2)];
+      const avatarWidth = getAvatarShoulderWidth();
+      calibratedArmScale = THREE.MathUtils.clamp(avatarWidth / medianWidth, 0.8, 1.3);
+      showEmotionToast('??', '??????? ????????????', `?????? ????: ${(medianWidth * 100).toFixed(0)} ?? | ???????: ${calibratedArmScale.toFixed(2)}x`);
+      const btnText = document.getElementById('calibrate-btn-text');
+      if (btnText) btnText.textContent = `?????????? (${calibratedArmScale.toFixed(2)}x)`;
+    } else {
+      showEmotionToast('?', '??????????', '???????? ????? ????? ??????? ?? 1 ???????...');
+    }
+  });
+}
+
 cameraBtn.addEventListener('click', () => {
   if (!isCameraRunning) {
     initTracking();
