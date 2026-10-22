@@ -1,0 +1,397 @@
+﻿<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VTuber Studio Pro — Трекинг лица, рук и тела</title>
+    <!-- MediaPipe Scripts -->
+    <script src="/mediapipe/camera_utils.js"></script>
+    <script src="/mediapipe/holistic.js"></script>
+    <script type="module" crossorigin src="/assets/index-CKRe7pKK.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-OpRH-QlB.css">
+  </head>
+  <body>
+    <!-- 3D Canvas Viewport -->
+    <canvas id="vrm-canvas"></canvas>
+
+    <!-- Top Navigation Bar -->
+    <header id="top-bar">
+      <div class="brand">
+        <div class="logo-badge">V1.0</div>
+        <h1>VTuber Studio <span>PRO</span></h1>
+      </div>
+
+      <div class="top-status">
+        <div class="status-item" id="fps-badge">
+          <span class="dot green"></span>
+          <span>FPS: <strong id="fps-val">60</strong></span>
+        </div>
+        <div class="status-item" id="cam-badge">
+          <span class="dot yellow"></span>
+          <span id="cam-status-text">Камера: Не активна</span>
+        </div>
+        <div class="status-item" id="model-badge">
+          <span class="dot blue"></span>
+          <span id="model-status-text">Модель: Загрузка...</span>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <button id="btn-recalibrate" class="btn btn-secondary" title="Сбросить в центр (Пробел)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          Центровать <kbd>Space</kbd>
+        </button>
+        <button id="btn-hide-ui" class="btn btn-ghost" title="Скрыть интерфейс для OBS (H)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          Скрыть UI <kbd>H</kbd>
+        </button>
+      </div>
+    </header>
+
+    <!-- Sidebar Controls -->
+    <aside id="controls-panel" class="panel">
+      <div class="panel-header">
+        <h2>Панель управления</h2>
+        <span class="subtitle">Отслеживание в реальном времени</span>
+      </div>
+
+      <div class="panel-scroll">
+        <!-- Section: Tracking Toggles -->
+        <section class="control-group">
+          <div class="group-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/><path d="m14.83 9.17 4.24-4.24"/><path d="m14.83 14.83 4.24 4.24"/><path d="m9.17 14.83-4.24 4.24"/></svg>
+            <h3>Модули трекинга</h3>
+          </div>
+
+          <!-- Head tracking -->
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-name">Голова и взгляд</span>
+              <span class="toggle-desc">Повороты и наклоны (Pitch/Yaw/Roll)</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-head" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Mouth & Eyes tracking -->
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-name">Рот и мимика</span>
+              <span class="toggle-desc">Форма рта (A, E, I, O, U) и моргание</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-mouth" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Torso & Spine tracking -->
+          <div class="toggle-row highlight">
+            <div class="toggle-info">
+              <span class="toggle-name">Туловище и позвоночник <span class="badge-tag">3D IK</span></span>
+              <span class="toggle-desc">Наклоны (Roll), повороты (Yaw) и покачивания</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-torso" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Hands & Fingers tracking -->
+          <div class="toggle-row highlight">
+            <div class="toggle-info">
+              <span class="toggle-name">Руки: плечи, локти и кисти <span class="badge-tag">FULL IK</span></span>
+              <span class="toggle-desc">Полная биомеханика рук и 5 пальцев</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-hands" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Sub-toggles for hands -->
+          <div class="hands-suboptions" id="hands-suboptions">
+            <div class="mini-toggle-row">
+              <span>Левая рука</span>
+              <div class="hand-indicator-wrap">
+                <span class="hand-state-badge" id="left-hand-state">IDLE</span>
+                <label class="mini-switch">
+                  <input type="checkbox" id="toggle-left-hand" checked />
+                  <span class="mini-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="mini-toggle-row">
+              <span>Правая рука</span>
+              <div class="hand-indicator-wrap">
+                <span class="hand-state-badge" id="right-hand-state">IDLE</span>
+                <label class="mini-switch">
+                  <input type="checkbox" id="toggle-right-hand" checked />
+                  <span class="mini-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="mini-toggle-row">
+              <span>Коллизии тела</span>
+              <div class="hand-indicator-wrap">
+                <label class="mini-switch" title="Предотвращает проваливание рук в туловище и лицо">
+                  <input type="checkbox" id="toggle-collision" checked />
+                  <span class="mini-slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Audio LipSync toggle -->
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-name">Аудио-липсинк (микрофон)</span>
+              <span class="toggle-desc">Движение рта по громкости голоса</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-mic" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Section: Emotion Presets & Gestures Palette -->
+        <section class="control-group">
+          <div class="group-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+            <h3>Палитра эмоций и жестов</h3>
+          </div>
+
+          <div class="toggle-row highlight">
+            <div class="toggle-info">
+              <span class="toggle-name">Авто-эмоции по жестам <span class="badge-tag">AI</span></span>
+              <span class="toggle-desc">👍 Респект, ✌️ Peace, 🤘 Коза и др.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-gestures" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Emotion Preset Selector Grid -->
+          <div class="emotion-grid" id="emotion-preset-grid">
+            <button class="emotion-btn auto-btn active" data-emotion="AUTO">
+              <span class="emotion-icon">✨</span>
+              <span>Авто (По жестам)</span>
+              <span class="emotion-badge">AI</span>
+            </button>
+            <button class="emotion-btn" data-emotion="THUMBS_UP">
+              <span class="emotion-icon">👍</span>
+              <span>Респект / Класс</span>
+            </button>
+            <button class="emotion-btn" data-emotion="PEACE">
+              <span class="emotion-icon">✌️</span>
+              <span>Победа / Peace</span>
+            </button>
+            <button class="emotion-btn" data-emotion="ROCK">
+              <span class="emotion-icon">🤘</span>
+              <span>Рок / Коза</span>
+            </button>
+            <button class="emotion-btn" data-emotion="OPEN_PALM">
+              <span class="emotion-icon">🖐️</span>
+              <span>Приветствие</span>
+            </button>
+            <button class="emotion-btn" data-emotion="HAPPY">
+              <span class="emotion-icon">😊</span>
+              <span>Радость</span>
+            </button>
+            <button class="emotion-btn" data-emotion="ANGRY">
+              <span class="emotion-icon">✊</span>
+              <span>Решимость</span>
+            </button>
+            <button class="emotion-btn" data-emotion="SURPRISED">
+              <span class="emotion-icon">😲</span>
+              <span>Удивление</span>
+            </button>
+            <button class="emotion-btn" data-emotion="RELAXED">
+              <span class="emotion-icon">😌</span>
+              <span>Спокойствие</span>
+            </button>
+            <button class="emotion-btn" data-emotion="NEUTRAL">
+              <span class="emotion-icon">😐</span>
+              <span>Нейтрально</span>
+            </button>
+          </div>
+
+          <div class="gesture-guide">
+            <div class="gesture-item" id="guide-thumbs">
+              <span class="g-icon">👍</span>
+              <div class="g-info">
+                <strong>Большой палец вверх</strong>
+                <span>Уверенная улыбка и респект</span>
+              </div>
+            </div>
+            <div class="gesture-item" id="guide-rock">
+              <span class="g-icon">🤘</span>
+              <div class="g-info">
+                <strong>Коза / Рок</strong>
+                <span>Драйв, открытые глаза</span>
+              </div>
+            </div>
+            <div class="gesture-item" id="guide-peace">
+              <span class="g-icon">✌️</span>
+              <div class="g-info">
+                <strong>Peace / V</strong>
+                <span>Милая аниме-улыбка</span>
+              </div>
+            </div>
+            <div class="gesture-item" id="guide-fist">
+              <span class="g-icon">✊</span>
+              <div class="g-info">
+                <strong>Кулак</strong>
+                <span>Боевой настрой и решимость</span>
+              </div>
+            </div>
+            <div class="gesture-item" id="guide-palm">
+              <span class="g-icon">🖐️</span>
+              <div class="g-info">
+                <strong>Открытая ладонь</strong>
+                <span>Дружеское приветствие</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section: Fine Tuning -->
+        <section class="control-group">
+          <div class="group-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            <h3>Чувствительность и фильтры</h3>
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Сглаживание (1€ Filter)</span>
+              <span class="slider-val" id="val-smoothing">35%</span>
+            </div>
+            <input type="range" id="input-smoothing" min="10" max="80" value="35" />
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Чувствительность головы</span>
+              <span class="slider-val" id="val-head-sens">1.0x</span>
+            </div>
+            <input type="range" id="input-head-sens" min="5" max="25" value="10" />
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Подвижность туловища</span>
+              <span class="slider-val" id="val-torso-sens">1.0x</span>
+            </div>
+            <input type="range" id="input-torso-sens" min="5" max="25" value="10" />
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Подвижность рук</span>
+              <span class="slider-val" id="val-hand-sens">1.0x</span>
+            </div>
+            <input type="range" id="input-hand-sens" min="5" max="25" value="10" />
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Открытие рта</span>
+              <span class="slider-val" id="val-mouth-sens">1.2x</span>
+            </div>
+            <input type="range" id="input-mouth-sens" min="5" max="25" value="12" />
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span>Чувствительность моргания</span>
+              <span class="slider-val" id="val-eye-sens">1.0x</span>
+            </div>
+            <input type="range" id="input-eye-sens" min="5" max="20" value="10" />
+          </div>
+        </section>
+
+        <!-- Section: Scene & Background -->
+        <section class="control-group">
+          <div class="group-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            <h3>Фон для OBS / Стримов</h3>
+          </div>
+
+          <div class="bg-presets">
+            <button class="bg-btn active" data-bg="#161822" style="background: #161822;" title="Тёмная студия"></button>
+            <button class="bg-btn" data-bg="#00ff00" style="background: #00ff00;" title="Green Screen (Хромакей)"></button>
+            <button class="bg-btn" data-bg="#0000ff" style="background: #0000ff;" title="Blue Screen"></button>
+            <button class="bg-btn" data-bg="#ff00ff" style="background: #ff00ff;" title="Magenta Screen"></button>
+            <button class="bg-btn transparent" data-bg="transparent" title="Прозрачный фон"></button>
+          </div>
+        </section>
+
+        <!-- Section: VRM Model Loader -->
+        <section class="control-group">
+          <div class="group-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <h3>Смена модели</h3>
+          </div>
+
+          <label class="drop-zone" id="drop-zone">
+            <input type="file" id="vrm-file-input" accept=".vrm" style="display: none;" />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
+            <span class="drop-title">Перетащите .VRM файл</span>
+            <span class="drop-subtitle">или нажмите для выбора</span>
+          </label>
+        </section>
+      </div>
+
+      <div class="panel-footer">
+        <button id="btn-start-camera" class="btn btn-primary full-width">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          <span id="camera-btn-text">Запустить камеру</span>
+        </button>
+      </div>
+        <button id="btn-calibrate-scale" class="btn btn-secondary full-width" style="margin-top: 8px;" title="????????????? ??????? ?? ??????? ?????? ????">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+          <span id="calibrate-btn-text">?????????? (T-????)</span>
+        </button>
+    </aside>
+
+    <!-- Floating Camera PIP Widget -->
+    <div id="pip-container" class="pip-widget">
+      <div class="pip-header">
+        <span class="pip-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+          Веб-камера и Landmarks
+        </span>
+        <div class="pip-controls">
+          <button id="btn-toggle-mirror" title="Зеркалирование">🪞</button>
+          <button id="btn-toggle-skeleton" title="Показывать скелет и точки" class="active">🦴</button>
+          <button id="btn-minimize-pip" title="Свернуть">_</button>
+        </div>
+      </div>
+      <div class="pip-body">
+        <video id="webcam" playsinline muted></video>
+        <canvas id="pip-overlay"></canvas>
+      </div>
+    </div>
+
+    <!-- UI Restore Trigger (visible when UI is hidden) -->
+    <button id="btn-restore-ui" class="floating-restore-btn hidden" title="Показать интерфейс (H)">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      Показать UI
+    </button>
+
+  
+    <!-- Animated Gesture Toast -->
+    <div id="gesture-toast" class="gesture-toast hidden">
+      <span class="gesture-icon" id="gesture-toast-icon">👍</span>
+      <div class="gesture-toast-text">
+        <span class="gesture-toast-title" id="gesture-toast-title">Одобрение</span>
+        <span class="gesture-toast-desc" id="gesture-toast-desc">Эмоция: Респект</span>
+      </div>
+    </div>
+  </body>
+</html>
