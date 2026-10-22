@@ -1,4 +1,4 @@
-/**
+﻿/**
  * VTuber Studio Pro - Standalone Portable Server (ESM)
  */
 import http from 'node:http';
@@ -37,7 +37,7 @@ if (!fs.existsSync(DIST_DIR)) {
   process.exit(1);
 }
 
-const server = http.createServer((req, res) => {
+function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
@@ -67,47 +67,69 @@ const server = http.createServer((req, res) => {
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
-  const stat = fs.statSync(filePath);
-  const total = stat.size;
+  try {
+    const stat = fs.statSync(filePath);
+    const total = stat.size;
 
-  const range = req.headers.range;
-  if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-    const partialstart = parts[0];
-    const partialend = parts[1];
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const partialstart = parts[0];
+      const partialend = parts[1];
 
-    const start = parseInt(partialstart, 10);
-    const end = partialend ? parseInt(partialend, 10) : total - 1;
-    const chunksize = end - start + 1;
+      const start = parseInt(partialstart, 10);
+      const end = partialend ? parseInt(partialend, 10) : total - 1;
+      const chunksize = end - start + 1;
 
-    res.writeHead(206, {
-      'Content-Range': `bytes ${start}-${end}/${total}`,
-      'Accept-Ranges': 'bytes',
-      'Content-Length': chunksize,
-      'Content-Type': contentType,
-    });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': contentType,
+      });
 
-    const fileStream = fs.createReadStream(filePath, { start, end });
-    fileStream.pipe(res);
-  } else {
-    res.writeHead(200, {
-      'Content-Length': total,
-      'Content-Type': contentType,
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-cache',
-    });
-    fs.createReadStream(filePath).pipe(res);
+      const fileStream = fs.createReadStream(filePath, { start, end });
+      fileStream.pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': total,
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    res.statusCode = 500;
+    res.end('Internal Server Error');
   }
-});
+}
 
 function startServer(port) {
-  server.listen(port, 'localhost', () => {
+  if (port >= 5200) {
+    console.error('[ERROR] All ports in range 5173-5200 are in use.');
+    return;
+  }
+
+  const server = http.createServer(handleRequest);
+
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`Port ${port} in use, trying ${port + 1}...`);
+      startServer(port + 1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+
+  server.once('listening', () => {
     const actualPort = server.address().port;
     const url = `http://localhost:${actualPort}/`;
     console.log('============================================================');
     console.log('   VTuber Studio Pro - Web Edition');
     console.log('============================================================');
     console.log(`   Running at: ${url}`);
+    console.log(`   Local IPv4: http://127.0.0.1:${actualPort}/`);
     console.log('   Press Ctrl+C in this console to stop');
     console.log('============================================================\n');
 
@@ -115,20 +137,8 @@ function startServer(port) {
                      process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
     exec(startCmd);
   });
-}
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    currentPort++;
-    if (currentPort < 5200) {
-      console.log(`Port ${currentPort - 1} in use, trying ${currentPort}...`);
-      startServer(currentPort);
-    } else {
-      console.error('All ports in range 5173-5200 are in use.');
-    }
-  } else {
-    console.error('Server error:', err);
-  }
-});
+  server.listen(port, '0.0.0.0');
+}
 
 startServer(currentPort);
