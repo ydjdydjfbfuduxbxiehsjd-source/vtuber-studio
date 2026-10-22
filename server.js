@@ -1,11 +1,14 @@
 /**
- * VTuber Studio Pro - Standalone Portable Server (Zero Dependencies)
- * Runs out-of-the-box on any machine with Node.js installed.
+ * VTuber Studio Pro - Standalone Portable Server (ESM)
  */
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { exec } = require('child_process');
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { exec } from 'node:child_process';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let currentPort = Number(process.env.PORT) || 5173;
 const DIST_DIR = path.join(__dirname, 'dist');
@@ -35,7 +38,6 @@ if (!fs.existsSync(DIST_DIR)) {
 }
 
 const server = http.createServer((req, res) => {
-  // CORS & Security headers for WASM & WebGL
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
@@ -45,14 +47,12 @@ const server = http.createServer((req, res) => {
 
   let filePath = path.join(DIST_DIR, reqPath);
 
-  // Security: prevent path traversal
   if (!filePath.startsWith(DIST_DIR)) {
     res.statusCode = 403;
     res.end('Access Denied');
     return;
   }
 
-  // SPA fallback
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     const indexPath = path.join(DIST_DIR, 'index.html');
     if (fs.existsSync(indexPath)) {
@@ -70,7 +70,6 @@ const server = http.createServer((req, res) => {
   const stat = fs.statSync(filePath);
   const total = stat.size;
 
-  // Support HTTP Range requests (crucial for streaming large WASM & VRM files)
   const range = req.headers.range;
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
@@ -122,7 +121,7 @@ server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     currentPort++;
     if (currentPort < 5200) {
-      console.log(`Port is in use, trying ${currentPort}...`);
+      console.log(`Port ${currentPort - 1} in use, trying ${currentPort}...`);
       startServer(currentPort);
     } else {
       console.error('All ports in range 5173-5200 are in use.');
