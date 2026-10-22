@@ -1,9 +1,6 @@
 # VTuber Studio Pro - Built-in Windows Native Server
 # Runs out-of-the-box on ANY Windows machine without Node.js or Python!
 
-$ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
 $distDir = Join-Path $PSScriptRoot "dist"
 if (-not (Test-Path $distDir)) {
     Write-Host "[ERROR] dist folder not found!" -ForegroundColor Red
@@ -17,7 +14,7 @@ $listener = $null
 while ($port -lt 5200) {
     try {
         $listener = New-Object System.Net.HttpListener
-        $listener.Prefixes.Add("http://localhost:$port/")
+        $listener.Prefixes.Add("http://127.0.0.1:$port/")
         $listener.Start()
         break
     } catch {
@@ -27,12 +24,12 @@ while ($port -lt 5200) {
 }
 
 if (-not $listener) {
-    Write-Host "[ERROR] Could not bind local port for server." -ForegroundColor Red
+    Write-Host "[ERROR] Could not bind port for server." -ForegroundColor Red
     Pause
     exit 1
 }
 
-$url = "http://localhost:$port/"
+$url = "http://127.0.0.1:$port/"
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "   VTuber Studio Pro - Server Started!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -41,7 +38,9 @@ Write-Host "   Running via Windows native HTTP engine." -ForegroundColor Gray
 Write-Host "   Close this window to stop the server." -ForegroundColor Gray
 Write-Host "============================================================`n" -ForegroundColor Cyan
 
-Start-Process $url
+try {
+    Start-Process $url
+} catch {}
 
 $mimeMap = @{
     ".html"     = "text/html; charset=utf-8"
@@ -63,9 +62,9 @@ $mimeMap = @{
 
 try {
     while ($listener.IsListening) {
-        $context = $listener.GetContext()
-        [System.Threading.ThreadPool]::QueueUserWorkItem({
-            param($ctx)
+        $ctx = $listener.GetContext()
+        
+        try {
             $req = $ctx.Request
             $res = $ctx.Response
 
@@ -90,20 +89,23 @@ try {
                 $ctype = if ($mimeMap.ContainsKey($ext)) { $mimeMap[$ext] } else { "application/octet-stream" }
                 $res.ContentType = $ctype
 
-                try {
-                    $bytes = [System.IO.File]::ReadAllBytes($filePath)
-                    $res.ContentLength64 = $bytes.Length
-                    $res.OutputStream.Write($bytes, 0, $bytes.Length)
-                } catch {}
+                $bytes = [System.IO.File]::ReadAllBytes($filePath)
+                $res.ContentLength64 = $bytes.Length
+                $res.OutputStream.Write($bytes, 0, $bytes.Length)
             } else {
                 $res.StatusCode = 404
             }
-            try { $res.OutputStream.Close() } catch {}
-        }, $context) | Out-Null
+        } catch {
+            # Catch client disconnects/aborts gracefully without crashing loop
+        } finally {
+            try { $ctx.Response.Close() } catch {}
+        }
     }
+} catch {
+    Write-Host "[INFO] Server stopped: $_" -ForegroundColor Yellow
 } finally {
     if ($listener) {
-        $listener.Stop()
-        $listener.Close()
+        try { $listener.Stop() } catch {}
+        try { $listener.Close() } catch {}
     }
 }
