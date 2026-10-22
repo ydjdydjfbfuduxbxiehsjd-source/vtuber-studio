@@ -508,23 +508,27 @@ function detectHandGesture(lm: any[] | null | undefined): RecognizedGesture {
    BODY COLLISION RESOLUTION (Torso, Chest, Head, Hips)
    Prevents hands, forearms, and elbows from passing through the body
    ========================================================================== */
-function resolveBodyColliders(point: THREE.Vector3, minMargin = 0.035): THREE.Vector3 {
+function resolveBodyColliders(point: THREE.Vector3, minMargin = 0.035, isWristOrHand = false): THREE.Vector3 {
   if (!currentVrm || !currentVrm.humanoid) return point.clone();
 
   const out = point.clone();
 
-  // 1. Head Sphere Collider (prevents hands from sinking inside the head/face)
-  const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
-  if (headNode) {
-    const headPos = new THREE.Vector3();
-    headNode.getWorldPosition(headPos);
-    headPos.y += 0.02; // Center on skull
-    const vHead = new THREE.Vector3().subVectors(out, headPos);
-    const headRadius = 0.11 + minMargin;
-    const distSq = vHead.lengthSq();
-    if (distSq < headRadius * headRadius && distSq > 1e-6) {
-      const dist = Math.sqrt(distSq);
-      out.copy(headPos).addScaledVector(vHead.multiplyScalar(1 / dist), headRadius);
+  // 1. Head Sphere Collider
+  // For wrists and hands: omit head sphere collision completely so the user's hand can touch their cheeks, chin, nose, and face!
+  // For elbows: keep head sphere collision active so elbows don't clip through the skull.
+  if (!isWristOrHand) {
+    const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
+    if (headNode) {
+      const headPos = new THREE.Vector3();
+      headNode.getWorldPosition(headPos);
+      headPos.y += 0.02; // Center on skull
+      const vHead = new THREE.Vector3().subVectors(out, headPos);
+      const headRadius = 0.11 + minMargin;
+      const distSq = vHead.lengthSq();
+      if (distSq < headRadius * headRadius && distSq > 1e-6) {
+        const dist = Math.sqrt(distSq);
+        out.copy(headPos).addScaledVector(vHead.multiplyScalar(1 / dist), headRadius);
+      }
     }
   }
 
@@ -569,6 +573,13 @@ function resolveBodyColliders(point: THREE.Vector3, minMargin = 0.035): THREE.Ve
   return out;
 }
 
+// Hand Tracking Temporal Hysteresis (~250ms window)
+let rightHandLastSeenTime = 0;
+let leftHandLastSeenTime = 0;
+let lastValidRightHandLM: any[] | null = null;
+let lastValidLeftHandLM: any[] | null = null;
+const HAND_HYSTERESIS_MS = 250;
+
 function solveArmVectorIK(
   targetSide: 'left' | 'right',
   S3d: { x: number; y: number; z: number },
@@ -585,113 +596,148 @@ function solveArmVectorIK(
   const slerpRate = THREE.MathUtils.clamp((1 - settings.smoothing) * 1.4, 0.18, 0.55);
   const mirrorX = settings.mirror ? -1 : 1;
 
-  // 1. Direct free-space arm vectors
-  const dUpper = new THREE.Vector3(
+  const upperBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftUpperArm' : 'rightUpperArm');
+  const lowerBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftLowerArm' : 'rightLowerArm');
+  const handBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftHand' : 'rightHand');
+  if (!upperBone || !lowerBone || !handBone) return;
+
+  const shoulderPos = new THREE.Vector3();
+  upperBone.getWorldPosition(shoulderPos);
+
+  // 1. Arm Lengths & Scaling (Avatar / User)
+  const L1_avatar = 0.22;
+  const L2_avatar = 0.215;
+  const L_avatar = L1_avatar + L2_avatar;
+
+  const userL1 = Math.hypot(E3d.x - S3d.x, E3d.y - S3d.y, E3d.z - S3d.z);
+  const userL2 = Math.hypot(W3d.x - E3d.x, W3d.y - E3d.y, W3d.z - E3d.z);
+  const userArmLen = Math.max(0.12, userL1 + userL2);
+
+  // Scale target reaching vector so user reaching their face guarantees avatar reaches its face
+  const armScale = THREE.MathUtils.clamp(L_avatar / userArmLen, 0.65, 1.85);
+
+  // 2. Position-based Target Wrist (Scaled from User Shoulder-to-Wrist)
+  const vUserWrist = new THREE.Vector3(
+    (W3d.x - S3d.x) * mirrorX,
+    -(W3d.y - S3d.y),
+    -(W3d.z - S3d.z)
+  );
+  if (vUserWrist.lengthSq() < 1e-6) vUserWrist.set(isLeft ? 0.25 : -0.25, -0.4, 0.1);
+
+  const targetWristPos = shoulderPos.clone().addScaledVector(vUserWrist, armScale);
+
+  // Body collision on wrist (isWristOrHand = true skips head sphere collision so hand can reach cheeks/face!)
+  const resolvedWristPos = settings.armCollision
+    ? resolveBodyColliders(targetWristPos, 0.02, true)
+    : targetWristPos;
+
+  // Reach vector from shoulder to resolved target wrist
+  const vReach = new THREE.Vector3().subVectors(resolvedWristPos, shoulderPos);
+  const reachDist = vReach.length();
+  const maxReach = L_avatar * 0.998;
+  const dClamped = THREE.MathUtils.clamp(reachDist, 0.03, maxReach);
+
+  const dTarget = reachDist > 1e-6
+    ? vReach.clone().multiplyScalar(1 / reachDist)
+    : new THREE.Vector3(isLeft ? 0.3 : -0.3, -0.8, 0).normalize();
+
+  // 3. Law of Cosines for Shoulder Angle (alpha)
+  const cosAlpha = (L1_avatar * L1_avatar + dClamped * dClamped - L2_avatar * L2_avatar) / (2 * L1_avatar * dClamped);
+  const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
+
+  // 4. Elbow Direction from MediaPipe Pose
+  const vUserElbow = new THREE.Vector3(
     (E3d.x - S3d.x) * mirrorX,
     -(E3d.y - S3d.y),
     -(E3d.z - S3d.z)
   );
-  if (dUpper.lengthSq() < 1e-6) dUpper.set(isLeft ? 0.3 : -0.3, -0.8, 0);
-  dUpper.normalize();
+  if (vUserElbow.lengthSq() < 1e-6) vUserElbow.set(isLeft ? 0.3 : -0.3, -0.7, -0.2);
 
-  const dForearm = new THREE.Vector3(
-    (W3d.x - E3d.x) * mirrorX,
-    -(W3d.y - E3d.y),
-    -(W3d.z - E3d.z)
-  );
-  if (dForearm.lengthSq() < 1e-6) dForearm.set(isLeft ? 0.2 : -0.2, -0.5, 0.3);
-  dForearm.normalize();
-
-  // 2. Physical Collision Resolution (stops hands/arms from penetrating torso & head)
-  if (settings.armCollision) {
-    const shoulderNode = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftUpperArm' : 'rightUpperArm');
-    if (shoulderNode) {
-      const shoulderPos = new THREE.Vector3();
-      shoulderNode.getWorldPosition(shoulderPos);
-
-      const L1 = 0.22;
-      const L2 = 0.215;
-      const currentElbowPos = shoulderPos.clone().addScaledVector(dUpper, L1);
-      const currentWristPos = currentElbowPos.clone().addScaledVector(dForearm, L2);
-
-      const resolvedElbow = resolveBodyColliders(currentElbowPos, 0.02);
-      const resolvedWrist = resolveBodyColliders(currentWristPos, 0.04);
-
-      if (resolvedElbow.distanceToSquared(currentElbowPos) > 1e-5) {
-        const vUp = resolvedElbow.clone().sub(shoulderPos);
-        if (vUp.lengthSq() > 1e-4) dUpper.copy(vUp.normalize());
-      }
-      if (resolvedWrist.distanceToSquared(currentWristPos) > 1e-5) {
-        const vLow = resolvedWrist.clone().sub(resolvedElbow);
-        if (vLow.lengthSq() > 1e-4) dForearm.copy(vLow.normalize());
-      }
+  // Bend plane normal: dTarget x vUserElbow
+  let planeNormal = new THREE.Vector3().crossVectors(dTarget, vUserElbow).normalize();
+  if (planeNormal.lengthSq() < 1e-4) {
+    const defaultPole = new THREE.Vector3(isLeft ? 0.35 : -0.35, -0.9, -0.2);
+    planeNormal = new THREE.Vector3().crossVectors(dTarget, defaultPole).normalize();
+    if (planeNormal.lengthSq() < 1e-4) {
+      planeNormal.set(0, 0, isLeft ? 1 : -1);
     }
   }
 
-  // 3. Apply Upper & Lower Arm bone rotations
-  const qUpperTarget = new THREE.Quaternion().setFromUnitVectors(vRest, dUpper);
-  const upperBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftUpperArm' : 'rightUpperArm');
-  if (upperBone) upperBone.quaternion.slerp(qUpperTarget, slerpRate);
+  // Upper arm vector: rotate dTarget around bend plane normal by alpha
+  const dUpper = dTarget.clone().applyAxisAngle(planeNormal, alpha).normalize();
 
-  const currentUpperQ = upperBone ? upperBone.quaternion.clone() : qUpperTarget;
+  // Elbow position: shoulder + dUpper * L1
+  const elbowPos = shoulderPos.clone().addScaledVector(dUpper, L1_avatar);
+  const resolvedElbowPos = settings.armCollision
+    ? resolveBodyColliders(elbowPos, 0.02, false)
+    : elbowPos;
+
+  if (resolvedElbowPos.distanceToSquared(elbowPos) > 1e-5) {
+    dUpper.subVectors(resolvedElbowPos, shoulderPos).normalize();
+  }
+
+  // Forearm vector: from elbow to resolved wrist
+  const dForearm = new THREE.Vector3().subVectors(resolvedWristPos, resolvedElbowPos).normalize();
+
+  // 5. Apply Bone Rotations
+  const qUpperTarget = new THREE.Quaternion().setFromUnitVectors(vRest, dUpper);
+  upperBone.quaternion.slerp(qUpperTarget, slerpRate);
+
+  const currentUpperQ = upperBone.quaternion.clone();
   const qUpperInv = currentUpperQ.clone().invert();
   const vLocalForearm = dForearm.clone().applyQuaternion(qUpperInv).normalize();
 
   const qLowerTarget = new THREE.Quaternion().setFromUnitVectors(vRest, vLocalForearm);
-  const lowerBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftLowerArm' : 'rightLowerArm');
-  if (lowerBone) lowerBone.quaternion.slerp(qLowerTarget, slerpRate);
+  lowerBone.quaternion.slerp(qLowerTarget, slerpRate);
 
-  // 4. WRIST ORIENTATION (Direct 3D Palm Basis from Landmarks)
-  const handBone = currentVrm.humanoid.getNormalizedBoneNode(isLeft ? 'leftHand' : 'rightHand');
-  if (handBone) {
-    if (handLM && handLM.length === 21) {
-      const p0 = handLM[0];
-      const p5 = handLM[5];
-      const p9 = handLM[9];
-      const p17 = handLM[17];
+  // 6. Direct Wrist Orientation (Orthonormal Basis from Hand Landmarks)
+  if (handLM && handLM.length === 21) {
+    const p0 = handLM[0];
+    const p5 = handLM[5];
+    const p9 = handLM[9];
+    const p17 = handLM[17];
 
-      let vFwd = new THREE.Vector3(
-        (p9.x - p0.x) * mirrorX,
-        -(p9.y - p0.y),
-        -(p9.z - p0.z)
-      ).normalize();
+    let vFwd = new THREE.Vector3(
+      (p9.x - p0.x) * mirrorX,
+      -(p9.y - p0.y),
+      -(p9.z - p0.z)
+    ).normalize();
 
-      let vAcross = new THREE.Vector3(
-        (p5.x - p17.x) * mirrorX,
-        -(p5.y - p17.y),
-        -(p5.z - p17.z)
-      );
+    let vAcross = new THREE.Vector3(
+      (p5.x - p17.x) * mirrorX,
+      -(p5.y - p17.y),
+      -(p5.z - p17.z)
+    );
 
-      if (vAcross.lengthSq() < 1e-6) vAcross.set(0, 1, 0);
-      else vAcross.normalize();
+    if (vAcross.lengthSq() < 1e-6) vAcross.set(0, 1, 0);
+    else vAcross.normalize();
 
-      vAcross.sub(vFwd.clone().multiplyScalar(vAcross.dot(vFwd))).normalize();
+    vAcross.sub(vFwd.clone().multiplyScalar(vAcross.dot(vFwd))).normalize();
 
-      let mBasis: THREE.Matrix4;
-      if (isLeft) {
-        const localX = vFwd;
-        const localZ = vAcross;
-        const localY = new THREE.Vector3().crossVectors(localZ, localX).normalize();
-        mBasis = new THREE.Matrix4().makeBasis(localX, localY, localZ);
-      } else {
-        const localX = vFwd.clone().negate();
-        const localZ = vAcross;
-        const localY = new THREE.Vector3().crossVectors(localZ, localX).normalize();
-        mBasis = new THREE.Matrix4().makeBasis(localX, localY, localZ);
-      }
-
-      const qHandWorld = new THREE.Quaternion().setFromRotationMatrix(mBasis);
-      const currentLowerQ = lowerBone ? lowerBone.quaternion.clone() : qLowerTarget;
-      const qArmWorld = currentUpperQ.clone().multiply(currentLowerQ);
-      const qHandLocalTarget = qArmWorld.clone().invert().multiply(qHandWorld);
-
-      handBone.quaternion.slerp(qHandLocalTarget, slerpRate * 0.85);
+    let mBasis: THREE.Matrix4;
+    if (isLeft) {
+      const localX = vFwd;
+      const localZ = vAcross;
+      const localY = new THREE.Vector3().crossVectors(localZ, localX).normalize();
+      mBasis = new THREE.Matrix4().makeBasis(localX, localY, localZ);
     } else {
-      handBone.quaternion.slerp(new THREE.Quaternion(), 0.1);
+      const localX = vFwd.clone().negate();
+      const localZ = vAcross;
+      const localY = new THREE.Vector3().crossVectors(localZ, localX).normalize();
+      mBasis = new THREE.Matrix4().makeBasis(localX, localY, localZ);
     }
+
+    const qHandWorld = new THREE.Quaternion().setFromRotationMatrix(mBasis);
+    const currentLowerQ = lowerBone.quaternion.clone();
+    const qArmWorld = currentUpperQ.clone().multiply(currentLowerQ);
+    const qHandLocalTarget = qArmWorld.clone().invert().multiply(qHandWorld);
+
+    handBone.quaternion.slerp(qHandLocalTarget, slerpRate * 0.85);
+  } else {
+    handBone.quaternion.slerp(new THREE.Quaternion(), 0.1);
   }
 
-  // 5. DIRECT FINGER TRACKING: All 5 fingers independently tracked from 21 MediaPipe landmarks
+  // 7. Direct 5-Finger Tracking (All 21 Landmarks)
   if (handLM && handLM.length === 21) {
     const fingerDefs = [
       { name: 'Thumb', joints: [1, 2, 3, 4], isThumb: true },
@@ -716,9 +762,9 @@ function solveArmVectorIK(
       const a2 = curl * (f.isThumb ? 0.7 : 1.35);
       const a3 = curl * (f.isThumb ? 0.7 : 1.15);
       const prefix = isLeft ? 'left' : 'right';
-      const b1Name = (prefix + f.name + (f.isThumb ? "Metacarpal" : "Proximal")) as VRMHumanBoneName;
-      const b2Name = (prefix + f.name + "Intermediate") as VRMHumanBoneName;
-      const b3Name = (prefix + f.name + "Distal") as VRMHumanBoneName;
+      const b1Name = (prefix + f.name + (f.isThumb ? 'Metacarpal' : 'Proximal')) as VRMHumanBoneName;
+      const b2Name = (prefix + f.name + 'Intermediate') as VRMHumanBoneName;
+      const b3Name = (prefix + f.name + 'Distal') as VRMHumanBoneName;
       const b1 = currentVrm.humanoid.getNormalizedBoneNode(b1Name);
       const b2 = currentVrm.humanoid.getNormalizedBoneNode(b2Name);
       const b3 = currentVrm.humanoid.getNormalizedBoneNode(b3Name);
@@ -1090,11 +1136,25 @@ function onHolisticResults(results: any) {
       const targetRightArm = settings.mirror ? 'left' : 'right';
       const targetLeftArm = settings.mirror ? 'right' : 'left';
 
-      // STRICT HAND-ONLY TRACKING:
-      // An arm is ONLY tracked if its hand is actually in view (21 hand landmarks detected).
-      // When hands are off-screen or not visible, arms STRICTLY stay down at the sides!
-      const isRightActive = Boolean(results.rightHandLandmarks && results.rightHandLandmarks.length === 21);
-      const isLeftActive = Boolean(results.leftHandLandmarks && results.leftHandLandmarks.length === 21);
+      // HAND TRACKING WITH 250MS TEMPORAL HYSTERESIS:
+      // Prevents arms from dropping or twitching if hands are briefly occluded while touching face
+      const now = performance.now();
+
+      const rightRawDetected = Boolean(results.rightHandLandmarks && results.rightHandLandmarks.length === 21);
+      if (rightRawDetected) {
+        rightHandLastSeenTime = now;
+        lastValidRightHandLM = results.rightHandLandmarks;
+      }
+      const isRightActive = rightRawDetected || (now - rightHandLastSeenTime < HAND_HYSTERESIS_MS);
+      const activeRightHandLM = rightRawDetected ? results.rightHandLandmarks : lastValidRightHandLM;
+
+      const leftRawDetected = Boolean(results.leftHandLandmarks && results.leftHandLandmarks.length === 21);
+      if (leftRawDetected) {
+        leftHandLastSeenTime = now;
+        lastValidLeftHandLM = results.leftHandLandmarks;
+      }
+      const isLeftActive = leftRawDetected || (now - leftHandLastSeenTime < HAND_HYSTERESIS_MS);
+      const activeLeftHandLM = leftRawDetected ? results.leftHandLandmarks : lastValidLeftHandLM;
 
       // Clavicle shrug (only active when the hand is visible)
       const userRightShrug = isRightActive ? (sMidY - s12.y) * 3.2 : 0;
@@ -1123,18 +1183,20 @@ function onHolisticResults(results: any) {
 
       // User Right Arm
       if (settings.rightHand && isRightActive && wl[12] && wl[14] && wl[16]) {
-        solveArmVectorIK(targetRightArm, wl[12], wl[14], wl[16], results.rightHandLandmarks, true, results.faceLandmarks);
-        updateHandBadge(rightHandBadge, Boolean(results.rightHandLandmarks));
+        solveArmVectorIK(targetRightArm, wl[12], wl[14], wl[16], activeRightHandLM, true, results.faceLandmarks);
+        updateHandBadge(rightHandBadge, true);
       } else {
+        lastValidRightHandLM = null;
         resetEntireArmToIdle(targetRightArm);
         updateHandBadge(rightHandBadge, false);
       }
 
       // User Left Arm
       if (settings.leftHand && isLeftActive && wl[11] && wl[13] && wl[15]) {
-        solveArmVectorIK(targetLeftArm, wl[11], wl[13], wl[15], results.leftHandLandmarks, false, results.faceLandmarks);
-        updateHandBadge(leftHandBadge, Boolean(results.leftHandLandmarks));
+        solveArmVectorIK(targetLeftArm, wl[11], wl[13], wl[15], activeLeftHandLM, false, results.faceLandmarks);
+        updateHandBadge(leftHandBadge, true);
       } else {
+        lastValidLeftHandLM = null;
         resetEntireArmToIdle(targetLeftArm);
         updateHandBadge(leftHandBadge, false);
       }
