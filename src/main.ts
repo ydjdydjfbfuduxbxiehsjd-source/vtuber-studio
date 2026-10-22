@@ -209,6 +209,70 @@ function applyRestingPose() {
   relaxFingers('right');
 }
 
+let isArkitModel = false;
+const modelExpressionNames = new Set<string>();
+
+function updateModelCapabilities() {
+  modelExpressionNames.clear();
+  if (currentVrm?.expressionManager?.expressionMap) {
+    for (const name of Object.keys(currentVrm.expressionManager.expressionMap)) {
+      modelExpressionNames.add(name);
+    }
+  }
+  isArkitModel =
+    modelExpressionNames.has('eyeBlinkLeft') ||
+    modelExpressionNames.has('jawOpen') ||
+    modelExpressionNames.has('mouthSmileLeft');
+
+  console.log(
+    `[Model Detection] Expressions: ${modelExpressionNames.size}, ARKit 52 Perfect Sync: ${isArkitModel}`
+  );
+}
+
+// setExpression defined above with capability check
+
+const btnLoadGyaru = document.getElementById('btn-load-gyaru');
+const btnLoadSample = document.getElementById('btn-load-sample');
+
+function updateActiveModelButton(activeModel: 'gyaru' | 'sample' | 'custom') {
+  if (btnLoadGyaru) {
+    if (activeModel === 'gyaru') {
+      btnLoadGyaru.classList.add('active-model-btn');
+      btnLoadGyaru.style.border = '1.5px solid var(--accent-primary)';
+      btnLoadGyaru.style.background = 'rgba(99, 102, 241, 0.15)';
+    } else {
+      btnLoadGyaru.classList.remove('active-model-btn');
+      btnLoadGyaru.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+      btnLoadGyaru.style.background = 'rgba(255, 255, 255, 0.04)';
+    }
+  }
+  if (btnLoadSample) {
+    if (activeModel === 'sample') {
+      btnLoadSample.classList.add('active-model-btn');
+      btnLoadSample.style.border = '1.5px solid var(--accent-primary)';
+      btnLoadSample.style.background = 'rgba(99, 102, 241, 0.15)';
+    } else {
+      btnLoadSample.classList.remove('active-model-btn');
+      btnLoadSample.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+      btnLoadSample.style.background = 'rgba(255, 255, 255, 0.04)';
+    }
+  }
+}
+
+if (btnLoadGyaru) {
+  btnLoadGyaru.addEventListener('click', () => {
+    updateActiveModelButton('gyaru');
+    loadVRM('/models/gyaru.vrm', 'Розовая Гяру');
+  });
+}
+
+if (btnLoadSample) {
+  btnLoadSample.addEventListener('click', () => {
+    updateActiveModelButton('sample');
+    loadVRM('/models/sample.vrm', 'Базовая модель');
+  });
+}
+
 function loadVRM(url: string, name = 'Sample Model') {
   modelStatusText.textContent = `Модель: Загрузка (${name})...`;
 
@@ -228,9 +292,10 @@ function loadVRM(url: string, name = 'Sample Model') {
       VRMUtils.rotateVRM0(vrm);
 
       scene.add(vrm.scene);
+      updateModelCapabilities();
       applyRestingPose();
 
-      modelStatusText.textContent = `Модель: ${name}`;
+      modelStatusText.textContent = `Модель: ${name} ${isArkitModel ? '(ARKit 52 ✨)' : ''}`;
       console.log('Loaded VRM successfully:', vrm);
     },
     (progress) => {
@@ -246,8 +311,8 @@ function loadVRM(url: string, name = 'Sample Model') {
   );
 }
 
-// Load default sample avatar
-loadVRM('/models/sample.vrm', 'Стандартный Аватар');
+// Load default active avatar: Gyaru (ARKit 52 Perfect Sync)
+loadVRM('/models/gyaru.vrm', 'Розовая Гяру');
 
 /* ==========================================================================
    BONE RIGGING & HELPER FUNCTIONS
@@ -674,9 +739,19 @@ function solveArmVectorIK(
   const shoulderPos = new THREE.Vector3();
   upperBone.getWorldPosition(shoulderPos);
 
-  // 1. Arm segment lengths (avatar metric scale)
-  const L1_avatar = 0.22;
-  const L2_avatar = 0.215;
+  // 1. Arm segment lengths (dynamically computed from active avatar skeleton)
+  let L1_avatar = 0.225;
+  let L2_avatar = 0.218;
+  const pUpper = new THREE.Vector3();
+  const pLower = new THREE.Vector3();
+  const pHand = new THREE.Vector3();
+  upperBone.getWorldPosition(pUpper);
+  lowerBone.getWorldPosition(pLower);
+  handBone.getWorldPosition(pHand);
+  const dUpperToLower = pUpper.distanceTo(pLower);
+  const dLowerToHand = pLower.distanceTo(pHand);
+  if (dUpperToLower > 0.1 && dUpperToLower < 0.6) L1_avatar = dUpperToLower;
+  if (dLowerToHand > 0.1 && dLowerToHand < 0.6) L2_avatar = dLowerToHand;
   const L_avatar = L1_avatar + L2_avatar;
 
   // 2. Position-based Target Wrist from Shoulder with Dampened Z (0.35x)
@@ -1116,15 +1191,31 @@ function onHolisticResults(results: any) {
   blendedEmotion.mouthOpen = THREE.MathUtils.lerp(blendedEmotion.mouthOpen, targetEmotion.mouthOpen, blendRate);
 
   // Apply base emotion blendshapes
-  setExpression('happy', blendedEmotion.happy);
-  setExpression('relaxed', blendedEmotion.relaxed);
-  setExpression('surprised', blendedEmotion.surprised);
-  setExpression('angry', blendedEmotion.angry);
-  setExpression('sad', blendedEmotion.sad);
+  if (isArkitModel) {
+    if (blendedEmotion.surprised > 0.05) {
+      setExpression('browInnerUp', blendedEmotion.surprised);
+      setExpression('eyeWideLeft', blendedEmotion.surprised * 0.7);
+      setExpression('eyeWideRight', blendedEmotion.surprised * 0.7);
+    }
+    if (blendedEmotion.angry > 0.05) {
+      setExpression('browDownLeft', blendedEmotion.angry);
+      setExpression('browDownRight', blendedEmotion.angry);
+      setExpression('noseSneerLeft', blendedEmotion.angry * 0.6);
+      setExpression('noseSneerRight', blendedEmotion.angry * 0.6);
+    }
+  } else {
+    setExpression('happy', blendedEmotion.happy);
+    setExpression('relaxed', blendedEmotion.relaxed);
+    setExpression('surprised', blendedEmotion.surprised);
+    setExpression('angry', blendedEmotion.angry);
+    setExpression('sad', blendedEmotion.sad);
+  }
 
-  // 2. FACE & HEAD ENGINE
+  // 2. FACE & HEAD ENGINE (ARKit 52 Perfect Sync & VRM Standard)
   if (results.faceLandmarks && results.faceLandmarks.length >= 468) {
     const lm = results.faceLandmarks;
+    const faceH = Math.hypot(lm[10].x - lm[152].x, lm[10].y - lm[152].y);
+    const faceW = Math.hypot(lm[234].x - lm[454].x, lm[234].y - lm[454].y);
 
     // A. Head & Neck Orientation
     if (settings.head) {
@@ -1150,7 +1241,7 @@ function onHolisticResults(results: any) {
       rigRotation('head', { x: headPitch * 0.75, y: headYaw * 0.75, z: headRoll * 0.75 }, 1, 0.35);
     }
 
-    // B. Eyes: 100% natural blinking (NO forced sleepy winks!)
+    // B. Eyes: Natural Blinking & Micro-Expressions (ARKit / VRM)
     if (settings.mouth) {
       const leftH = Math.hypot(lm[159].x - lm[145].x, lm[159].y - lm[145].y);
       const leftW = Math.hypot(lm[133].x - lm[33].x, lm[133].y - lm[33].y);
@@ -1160,7 +1251,7 @@ function onHolisticResults(results: any) {
       const rightW = Math.hypot(lm[362].x - lm[263].x, lm[362].y - lm[263].y);
       const rightRatio = rightH / (rightW > 1e-4 ? rightW : 1);
 
-      // Hysteresis threshold
+      // Hysteresis threshold for blink
       const calcBlink = (ratio: number) => {
         if (ratio >= 0.21) return 0;
         if (ratio <= 0.12) return 1;
@@ -1174,17 +1265,85 @@ function onHolisticResults(results: any) {
       const avatarBlinkL = settings.mirror ? userRightBlink : userLeftBlink;
       const avatarBlinkR = settings.mirror ? userLeftBlink : userRightBlink;
 
-      setExpression('blinkLeft', avatarBlinkL);
-      setExpression('blinkRight', avatarBlinkR);
+      if (isArkitModel) {
+        setExpression('eyeBlinkLeft', avatarBlinkL);
+        setExpression('eyeBlinkRight', avatarBlinkR);
 
-      // When hand is on face, avoid forced dual-eye squint if only one eye is occluded
-      if (Math.abs(avatarBlinkL - avatarBlinkR) < 0.25) {
-        setExpression('blink', Math.max(avatarBlinkL, avatarBlinkR));
+        // Eye Wide
+        const userLeftWide = leftRatio > 0.26 ? THREE.MathUtils.clamp(((leftRatio - 0.26) / 0.08) * settings.eyeSens, 0, 1) : 0;
+        const userRightWide = rightRatio > 0.26 ? THREE.MathUtils.clamp(((rightRatio - 0.26) / 0.08) * settings.eyeSens, 0, 1) : 0;
+        setExpression('eyeWideLeft', settings.mirror ? userRightWide : userLeftWide);
+        setExpression('eyeWideRight', settings.mirror ? userLeftWide : userRightWide);
+
+        // Eye Squint
+        const userLeftSquint = (leftRatio > 0.12 && leftRatio < 0.21) ? THREE.MathUtils.clamp((0.21 - leftRatio) * 6, 0, 1) : 0;
+        const userRightSquint = (rightRatio > 0.12 && rightRatio < 0.21) ? THREE.MathUtils.clamp((0.21 - rightRatio) * 6, 0, 1) : 0;
+        setExpression('eyeSquintLeft', settings.mirror ? userRightSquint : userLeftSquint);
+        setExpression('eyeSquintRight', settings.mirror ? userLeftSquint : userRightSquint);
+
+        // Iris / Gaze direction tracking (MediaPipe landmarks 468 & 473)
+        if (lm.length >= 478) {
+          const lCenterX = (lm[33].x + lm[133].x) / 2;
+          const lCenterY = (lm[159].y + lm[145].y) / 2;
+          const rCenterX = (lm[263].x + lm[362].x) / 2;
+          const rCenterY = (lm[386].y + lm[374].y) / 2;
+
+          const gazeLX = (lm[468].x - lCenterX) / (leftW > 1e-4 ? leftW : 1);
+          const gazeLY = (lm[468].y - lCenterY) / (leftH > 1e-4 ? leftH : 1);
+          const gazeRX = (lm[473].x - rCenterX) / (rightW > 1e-4 ? rightW : 1);
+          const gazeRY = (lm[473].y - rCenterY) / (rightH > 1e-4 ? rightH : 1);
+
+          const lookUpL = gazeLY < -0.06 ? THREE.MathUtils.clamp((-gazeLY - 0.06) * 3.5, 0, 1) : 0;
+          const lookDownL = gazeLY > 0.06 ? THREE.MathUtils.clamp((gazeLY - 0.06) * 3.5, 0, 1) : 0;
+          const lookInL = gazeLX > 0.05 ? THREE.MathUtils.clamp((gazeLX - 0.05) * 3.5, 0, 1) : 0;
+          const lookOutL = gazeLX < -0.05 ? THREE.MathUtils.clamp((-gazeLX - 0.05) * 3.5, 0, 1) : 0;
+
+          const lookUpR = gazeRY < -0.06 ? THREE.MathUtils.clamp((-gazeRY - 0.06) * 3.5, 0, 1) : 0;
+          const lookDownR = gazeRY > 0.06 ? THREE.MathUtils.clamp((gazeRY - 0.06) * 3.5, 0, 1) : 0;
+          const lookInR = gazeRX < -0.05 ? THREE.MathUtils.clamp((-gazeRX - 0.05) * 3.5, 0, 1) : 0;
+          const lookOutR = gazeRX > 0.05 ? THREE.MathUtils.clamp((gazeRX - 0.05) * 3.5, 0, 1) : 0;
+
+          setExpression('eyeLookUpLeft', settings.mirror ? lookUpR : lookUpL);
+          setExpression('eyeLookDownLeft', settings.mirror ? lookDownR : lookDownL);
+          setExpression('eyeLookInLeft', settings.mirror ? lookInR : lookInL);
+          setExpression('eyeLookOutLeft', settings.mirror ? lookOutR : lookOutL);
+
+          setExpression('eyeLookUpRight', settings.mirror ? lookUpL : lookUpR);
+          setExpression('eyeLookDownRight', settings.mirror ? lookDownL : lookDownR);
+          setExpression('eyeLookInRight', settings.mirror ? lookInL : lookInR);
+          setExpression('eyeLookOutRight', settings.mirror ? lookOutL : lookOutR);
+        }
+
+        // Eyebrows
+        const glabellaY = lm[168].y;
+        const innerBrowDist = (glabellaY - (lm[107].y + lm[336].y) / 2) / (faceH > 1e-4 ? faceH : 1);
+        const browInnerUp = innerBrowDist > 0.055 ? THREE.MathUtils.clamp((innerBrowDist - 0.055) * 16, 0, 1) : 0;
+        setExpression('browInnerUp', browInnerUp);
+
+        const browDownRawL = (lm[107].y - glabellaY) / (faceH > 1e-4 ? faceH : 1);
+        const browDownRawR = (lm[336].y - glabellaY) / (faceH > 1e-4 ? faceH : 1);
+        const browDownL = browDownRawL > -0.045 ? THREE.MathUtils.clamp((browDownRawL + 0.045) * 20, 0, 1) : 0;
+        const browDownR = browDownRawR > -0.045 ? THREE.MathUtils.clamp((browDownRawR + 0.045) * 20, 0, 1) : 0;
+        setExpression('browDownLeft', settings.mirror ? browDownR : browDownL);
+        setExpression('browDownRight', settings.mirror ? browDownL : browDownR);
+
+        const outerDistL = (lm[33].y - lm[70].y) / (faceH > 1e-4 ? faceH : 1);
+        const outerDistR = (lm[263].y - lm[300].y) / (faceH > 1e-4 ? faceH : 1);
+        const browOuterL = outerDistL > 0.10 ? THREE.MathUtils.clamp((outerDistL - 0.10) * 14, 0, 1) : 0;
+        const browOuterR = outerDistR > 0.10 ? THREE.MathUtils.clamp((outerDistR - 0.10) * 14, 0, 1) : 0;
+        setExpression('browOuterUpLeft', settings.mirror ? browOuterR : browOuterL);
+        setExpression('browOuterUpRight', settings.mirror ? browOuterL : browOuterR);
       } else {
-        setExpression('blink', 0);
+        setExpression('blinkLeft', avatarBlinkL);
+        setExpression('blinkRight', avatarBlinkR);
+        if (Math.abs(avatarBlinkL - avatarBlinkR) < 0.25) {
+          setExpression('blink', Math.max(avatarBlinkL, avatarBlinkR));
+        } else {
+          setExpression('blink', 0);
+        }
       }
 
-      // C. Mouth: Strict noise gate at rest + expressive speech & smiles
+      // C. Mouth, Jaw & Cheeks: Strict noise gate at rest + expressive speech & smiles
       const mouthH = Math.hypot(lm[13].x - lm[14].x, lm[13].y - lm[14].y);
       const mouthW = Math.hypot(lm[61].x - lm[291].x, lm[61].y - lm[291].y);
       const mouthOpenRatio = mouthH / (mouthW > 1e-4 ? mouthW : 1);
@@ -1194,13 +1353,48 @@ function onHolisticResults(results: any) {
         webcamMouthOpen = THREE.MathUtils.clamp(((mouthOpenRatio - 0.14) / 0.28) * settings.mouthSens, 0, 1);
       }
 
-      // Smile from mouth corners
-      const cornerMidY = (lm[61].y + lm[291].y) / 2;
-      const smileRatio = (lm[13].y - cornerMidY) / (mouthW > 1e-4 ? mouthW : 1);
-      const webcamSmile = smileRatio > 0.03 ? THREE.MathUtils.clamp((smileRatio - 0.03) * 6, 0, 0.7) : 0;
+      // Smile & Frown from mouth corners
+            const lipMidY = (lm[13].y + lm[14].y) / 2;
+      const cornerDeltaL = (lipMidY - lm[61].y) / (mouthW > 1e-4 ? mouthW : 1);
+      const cornerDeltaR = (lipMidY - lm[291].y) / (mouthW > 1e-4 ? mouthW : 1);
+
+      const smileL = cornerDeltaL > 0.03 ? THREE.MathUtils.clamp((cornerDeltaL - 0.03) * 6.5, 0, 1) : 0;
+      const smileR = cornerDeltaR > 0.03 ? THREE.MathUtils.clamp((cornerDeltaR - 0.03) * 6.5, 0, 1) : 0;
+      const frownL = cornerDeltaL < -0.04 ? THREE.MathUtils.clamp((-cornerDeltaL - 0.04) * 6.0, 0, 1) : 0;
+      const frownR = cornerDeltaR < -0.04 ? THREE.MathUtils.clamp((-cornerDeltaR - 0.04) * 6.0, 0, 1) : 0;
+
+      // Pucker & Funnel
+      const mouthWidthNorm = mouthW / (faceW > 1e-4 ? faceW : 1);
+      const puckerRatio = mouthWidthNorm < 0.32 ? THREE.MathUtils.clamp((0.32 - mouthWidthNorm) / 0.10, 0, 1) : 0;
+      const pucker = puckerRatio * (1 - webcamMouthOpen);
+      const funnel = puckerRatio * THREE.MathUtils.clamp(webcamMouthOpen * 1.5, 0, 1);
+
+      // Cheeks & Nose
+      const cheekDist = Math.hypot(lm[205].x - lm[425].x, lm[205].y - lm[425].y) / (faceW > 1e-4 ? faceW : 1);
+      const cheekPuff = (webcamMouthOpen < 0.15 && cheekDist > 0.77) ? THREE.MathUtils.clamp((cheekDist - 0.77) * 8, 0, 1) : 0;
+      const cheekSquintL = THREE.MathUtils.clamp(smileL * 0.75, 0, 1);
+      const cheekSquintR = THREE.MathUtils.clamp(smileR * 0.75, 0, 1);
+      const noseSneer = THREE.MathUtils.clamp((smileL + smileR) * 0.25 + (frownL + frownR) * 0.25, 0, 1);
+
+      // Jaw shift
+      const chinShiftX = (lm[152].x - lm[1].x) / (faceW > 1e-4 ? faceW : 1);
+      const jawL = chinShiftX < -0.02 ? THREE.MathUtils.clamp((-chinShiftX - 0.02) * 8, 0, 1) : 0;
+      const jawR = chinShiftX > 0.02 ? THREE.MathUtils.clamp((chinShiftX - 0.02) * 8, 0, 1) : 0;
 
       currentWebcamMouthOpen = webcamMouthOpen;
-      currentWebcamSmile = webcamSmile;
+      currentWebcamSmileL = smileL;
+      currentWebcamSmileR = smileR;
+      currentWebcamFrownL = frownL;
+      currentWebcamFrownR = frownR;
+      currentMouthPucker = pucker;
+      currentMouthFunnel = funnel;
+      currentCheekPuff = cheekPuff;
+      currentCheekSquintL = cheekSquintL;
+      currentCheekSquintR = cheekSquintR;
+      currentNoseSneer = noseSneer;
+      currentJawLeft = jawL;
+      currentJawRight = jawR;
+
       applyMouthExpressions();
     }
   }
@@ -1410,7 +1604,18 @@ async function initTracking() {
 
 
 let currentWebcamMouthOpen = 0;
-let currentWebcamSmile = 0;
+let currentWebcamSmileL = 0;
+let currentWebcamSmileR = 0;
+let currentWebcamFrownL = 0;
+let currentWebcamFrownR = 0;
+let currentMouthPucker = 0;
+let currentMouthFunnel = 0;
+let currentCheekPuff = 0;
+let currentCheekSquintL = 0;
+let currentCheekSquintR = 0;
+let currentNoseSneer = 0;
+let currentJawLeft = 0;
+let currentJawRight = 0;
 let currentAudioMouthOpen = 0;
 let audioTimeData: Uint8Array | null = null;
 let micStream: MediaStream | null = null;
@@ -1425,16 +1630,52 @@ function applyMouthExpressions() {
   const totalOpen = Math.max(mouthFromWebcam, mouthFromAudio, mouthFromEmotion);
   const clampedOpen = THREE.MathUtils.clamp(totalOpen, 0, 1);
 
-  setExpression('aa', clampedOpen);
-  setExpression('oh', clampedOpen * 0.35);
-  setExpression('ih', mouthFromAudio * 0.2);
-  setExpression('ou', clampedOpen * 0.15);
-  setExpression('ee', 0);
+  if (isArkitModel) {
+    setExpression('jawOpen', clampedOpen);
 
-  if (blendedEmotion.happy > 0.05) {
-    setExpression('happy', blendedEmotion.happy);
-  } else if (settings.mouth) {
-    setExpression('happy', currentWebcamSmile);
+    const avatarSmileL = settings.mirror ? currentWebcamSmileR : currentWebcamSmileL;
+    const avatarSmileR = settings.mirror ? currentWebcamSmileL : currentWebcamSmileR;
+    const avatarFrownL = settings.mirror ? currentWebcamFrownR : currentWebcamFrownL;
+    const avatarFrownR = settings.mirror ? currentWebcamFrownL : currentWebcamFrownR;
+
+    if (blendedEmotion.happy > 0.05) {
+      setExpression('mouthSmileLeft', Math.max(avatarSmileL, blendedEmotion.happy));
+      setExpression('mouthSmileRight', Math.max(avatarSmileR, blendedEmotion.happy));
+    } else {
+      setExpression('mouthSmileLeft', avatarSmileL);
+      setExpression('mouthSmileRight', avatarSmileR);
+    }
+
+    if (blendedEmotion.sad > 0.05) {
+      setExpression('mouthFrownLeft', Math.max(avatarFrownL, blendedEmotion.sad));
+      setExpression('mouthFrownRight', Math.max(avatarFrownR, blendedEmotion.sad));
+    } else {
+      setExpression('mouthFrownLeft', avatarFrownL);
+      setExpression('mouthFrownRight', avatarFrownR);
+    }
+
+    setExpression('mouthPucker', currentMouthPucker);
+    setExpression('mouthFunnel', currentMouthFunnel);
+    setExpression('cheekPuff', currentCheekPuff);
+    setExpression('cheekSquintLeft', settings.mirror ? currentCheekSquintR : currentCheekSquintL);
+    setExpression('cheekSquintRight', settings.mirror ? currentCheekSquintL : currentCheekSquintR);
+    setExpression('noseSneerLeft', currentNoseSneer);
+    setExpression('noseSneerRight', currentNoseSneer);
+    setExpression('jawLeft', settings.mirror ? currentJawRight : currentJawLeft);
+    setExpression('jawRight', settings.mirror ? currentJawLeft : currentJawRight);
+  } else {
+    setExpression('aa', clampedOpen);
+    setExpression('oh', clampedOpen * 0.35);
+    setExpression('ih', mouthFromAudio * 0.2);
+    setExpression('ou', clampedOpen * 0.15);
+    setExpression('ee', 0);
+
+    const avgSmile = (currentWebcamSmileL + currentWebcamSmileR) / 2;
+    if (blendedEmotion.happy > 0.05) {
+      setExpression('happy', blendedEmotion.happy);
+    } else if (settings.mouth) {
+      setExpression('happy', avgSmile);
+    }
   }
 }
 
@@ -1514,7 +1755,7 @@ const btnCalibrate = document.getElementById('btn-calibrate-scale');
 if (btnCalibrate) {
   btnCalibrate.addEventListener('click', () => {
     if (!isCameraRunning) {
-      showEmotionToast('??', '??????????', '??????? ????????? ??????');
+      showEmotionToast('📷', 'Калибровка', 'Сначала запустите камеру');
       return;
     }
     if (shoulderSamples.length >= 5) {
@@ -1522,11 +1763,11 @@ if (btnCalibrate) {
       const medianWidth = sorted[Math.floor(sorted.length / 2)];
       const avatarWidth = getAvatarShoulderWidth();
       calibratedArmScale = THREE.MathUtils.clamp(avatarWidth / medianWidth, 0.8, 1.3);
-      showEmotionToast('??', '??????? ????????????', `?????? ????: ${(medianWidth * 100).toFixed(0)} ?? | ???????: ${calibratedArmScale.toFixed(2)}x`);
+      showEmotionToast('🎯', 'Масштаб откалиброван', `Ширина плеч: ${(medianWidth * 100).toFixed(0)} см | Масштаб: ${calibratedArmScale.toFixed(2)}x`);
       const btnText = document.getElementById('calibrate-btn-text');
-      if (btnText) btnText.textContent = `?????????? (${calibratedArmScale.toFixed(2)}x)`;
+      if (btnText) btnText.textContent = `Калибровка (${calibratedArmScale.toFixed(2)}x)`;
     } else {
-      showEmotionToast('?', '??????????', '???????? ????? ????? ??????? ?? 1 ???????...');
+      showEmotionToast('⏳', 'Калибровка', 'Постойте прямо перед камерой еще 1 секунду...');
     }
   });
 }
@@ -1775,7 +2016,7 @@ fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
   if (file) {
     const url = URL.createObjectURL(file);
-    loadVRM(url, file.name);
+    updateActiveModelButton('custom'); loadVRM(url, file.name);
   }
 });
 
@@ -1795,7 +2036,7 @@ window.addEventListener('drop', (e) => {
   const file = e.dataTransfer?.files?.[0];
   if (file && file.name.toLowerCase().endsWith('.vrm')) {
     const url = URL.createObjectURL(file);
-    loadVRM(url, file.name);
+    updateActiveModelButton('custom'); loadVRM(url, file.name);
   }
 });
 
