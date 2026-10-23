@@ -793,6 +793,20 @@ export function computeArmScale(userShoulderWidth: number | null): number {
   return lastGoodArmScale || 1.0;
 }
 
+/* ==========================================================================
+   FACE TOUCH ENGINE WITH HYSTERESIS & EXPONENTIAL BLENDING (STAGE 4)
+   ========================================================================== */
+export interface FaceTouchState {
+  isActive: boolean;
+  weight: number; // 0.0 to 1.0
+  lastTimestamp: number;
+}
+
+export const faceTouchState: { left: FaceTouchState; right: FaceTouchState } = {
+  left: { isActive: false, weight: 0.0, lastTimestamp: 0 },
+  right: { isActive: false, weight: 0.0, lastTimestamp: 0 },
+};
+
 function solveArmVectorIK(
   targetSide: 'left' | 'right',
   S3d: { x: number; y: number; z: number },
@@ -836,41 +850,57 @@ function solveArmVectorIK(
   // Scaled by shoulder width ratio (range: 0.8 - 1.3)
   let targetWristPos = shoulderPos.clone().addScaledVector(vUserWrist, armScale);
 
-  // 3. FACE-TOUCH MODE:
-  // If 2D wrist from Hands is close to nose or forehead from Face Mesh (<= 0.28 face height),
-  // target wrist attaches directly to the avatar's head bone + relative face displacement!
+  // 3. FACE-TOUCH MODE (STAGE 4: HYSTERESIS & EXPONENTIAL BLENDING)
+  const ftState = faceTouchState[targetSide];
+  const nowTime = performance.now();
+  if (ftState.lastTimestamp === 0) ftState.lastTimestamp = nowTime;
+  const dt = Math.min(0.1, Math.max(0.001, (nowTime - ftState.lastTimestamp) / 1000));
+  ftState.lastTimestamp = nowTime;
+
+  let headWristTarget: THREE.Vector3 | null = null;
+
   if (faceLM && faceLM.length >= 468 && handLM && handLM.length === 21) {
     const nose = faceLM[1];
     const forehead = faceLM[10];
     const chin = faceLM[152];
-    const leftCheek = faceLM[454];
-    const rightCheek = faceLM[234];
+    const leftCheek = faceLM[234];
+    const rightCheek = faceLM[454];
 
-    const faceH = Math.max(0.12, Math.abs(chin.y - forehead.y));
-    const faceW = Math.max(0.08, Math.abs(leftCheek.x - rightCheek.x));
-    const faceThreshold = faceH * 0.28;
+    // Face height between forehead (10) and chin (152)
+    const faceSize = Math.hypot(forehead.x - chin.x, forehead.y - chin.y);
+    const validFaceSize = (Number.isFinite(faceSize) && faceSize > 0.05) ? faceSize : 0.15;
 
+    // Wrist (0), Index MCP (5), Pinky MCP (17), Palm Center
     const p0 = handLM[0];
-    const p9 = handLM[9];
-    const pCenter = { x: (p0.x + p9.x) / 2, y: (p0.y + p9.y) / 2 };
+    const p5 = handLM[5];
+    const p17 = handLM[17];
+    const palmCenter = {
+      x: (p0.x + p5.x + p17.x) / 3,
+      y: (p0.y + p5.y + p17.y) / 3,
+    };
 
-    const dNose = Math.min(
-      Math.hypot(p0.x - nose.x, p0.y - nose.y),
-      Math.hypot(pCenter.x - nose.x, pCenter.y - nose.y)
-    );
-    const dForehead = Math.min(
-      Math.hypot(p0.x - forehead.x, p0.y - forehead.y),
-      Math.hypot(pCenter.x - forehead.x, pCenter.y - forehead.y)
-    );
-    const dChin = Math.hypot(p0.x - chin.x, p0.y - chin.y);
-    const dCheek = Math.hypot(
-      p0.x - (isLeft ? rightCheek.x : leftCheek.x),
-      p0.y - (isLeft ? rightCheek.y : leftCheek.y)
+    const distToPt = (pt: { x: number; y: number }) => Math.min(
+      Math.hypot(p0.x - pt.x, p0.y - pt.y),
+      Math.hypot(palmCenter.x - pt.x, palmCenter.y - pt.y)
     );
 
-    const minDistToFace = Math.min(dNose, dForehead, dChin, dCheek);
+    const dNose = distToPt(nose);
+    const dForehead = distToPt(forehead);
+    const dChin = distToPt(chin);
+    const dLCheek = distToPt(leftCheek);
+    const dRCheek = distToPt(rightCheek);
 
-    if (minDistToFace < faceThreshold) {
+    const minDistToFace = Math.min(dNose, dForehead, dChin, dLCheek, dRCheek);
+    const normDist = minDistToFace / validFaceSize;
+
+    // Hysteresis: activate at < 0.25, deactivate at > 0.35
+    if (!ftState.isActive && normDist < 0.25) {
+      ftState.isActive = true;
+    } else if (ftState.isActive && normDist > 0.35) {
+      ftState.isActive = false;
+    }
+
+    if (ftState.isActive || ftState.weight > 0.01) {
       const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
       if (headNode) {
         const headPos = new THREE.Vector3();
@@ -878,27 +908,33 @@ function solveArmVectorIK(
         headNode.getWorldPosition(headPos);
         headNode.getWorldQuaternion(headQuat);
 
+        const faceW = Math.max(0.08, Math.hypot(leftCheek.x - rightCheek.x, leftCheek.y - rightCheek.y));
         const faceMidY = (forehead.y + chin.y) / 2;
-        const relX = (p0.x - nose.x) / faceW;
-        const relY = (p0.y - faceMidY) / faceH;
+        const bestPt = Math.hypot(p0.x - nose.x, p0.y - nose.y) < Math.hypot(palmCenter.x - nose.x, palmCenter.y - nose.y) ? p0 : palmCenter;
+        const relX = (bestPt.x - nose.x) / faceW;
+        const relY = (bestPt.y - faceMidY) / validFaceSize;
 
-        // Position on the surface of the forehead/face (+0.095m forward)
+        // Target surface of head with 0.025m outward margin to prevent mesh penetration
         const localHeadOffset = new THREE.Vector3(
-          relX * mirrorX * 0.12,
-          -relY * 0.14 - 0.01,
-          0.095
+          THREE.MathUtils.clamp(relX * mirrorX * 0.11, -0.11, 0.11),
+          THREE.MathUtils.clamp(-relY * 0.13 - 0.015, -0.14, 0.10),
+          0.105
         );
-        const headWristTarget = headPos.clone().add(localHeadOffset.applyQuaternion(headQuat));
-
-        // Smoothly blend into face contact position
-        const faceTouchWeight = THREE.MathUtils.clamp(
-          (faceThreshold - minDistToFace) / (faceThreshold * 0.5),
-          0,
-          1
-        );
-        targetWristPos.lerp(headWristTarget, faceTouchWeight);
+        headWristTarget = headPos.clone().add(localHeadOffset.applyQuaternion(headQuat));
       }
     }
+  } else {
+    ftState.isActive = false;
+  }
+
+  // Smooth exponential blending (100 - 150 ms)
+  const targetWeight = ftState.isActive ? 1.0 : 0.0;
+  const blendAlpha = 1.0 - Math.exp(-dt / 0.12);
+  ftState.weight += (targetWeight - ftState.weight) * blendAlpha;
+  ftState.weight = THREE.MathUtils.clamp(ftState.weight, 0.0, 1.0);
+
+  if (headWristTarget && ftState.weight > 0.001) {
+    targetWristPos.lerp(headWristTarget, ftState.weight);
   }
 
   // Body collision resolution on wrist (isWristOrHand = true bypasses head sphere)
