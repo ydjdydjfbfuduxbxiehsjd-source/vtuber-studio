@@ -1,6 +1,6 @@
 ﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log(
-  '%c VTuber Studio PRO %c v1.1.0 build 2026-10-23 22:20 %c feature/arm-reach-fix ',
+  '%c VTuber Studio PRO %c v1.2.0 build 2026-10-23 23:00 %c feature/arm-tracking-rewrite ',
   'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
   'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
   'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
@@ -10,6 +10,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils, VRM, type VRMHumanBoneName } from '@pixiv/three-vrm';
 import { OneEuroFilter3D } from './oneEuroFilter';
+import { ArmRig, ArmDebugVisualizer } from './tracking/armRig';
+import { solveArmVectorIKLegacy } from './legacy/armTrackingLegacy';
 
 // Declare globals for MediaPipe UMD scripts loaded via index.html
 declare global {
@@ -23,6 +25,7 @@ declare global {
    APP STATE & SETTINGS
    ========================================================================== */
 interface TrackingSettings {
+  legacyArmTracking: boolean;
   head: boolean;
   mouth: boolean;
   hands: boolean;
@@ -46,6 +49,7 @@ interface TrackingSettings {
 
 
 const settings: TrackingSettings = {
+  legacyArmTracking: false,
   head: true,
   mouth: true,
   hands: true,
@@ -90,12 +94,15 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance',
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
 const scene = new THREE.Scene();
+const armRigLeft = new ArmRig('left');
+const armRigRight = new ArmRig('right');
+const armDebugVisualizer = new ArmDebugVisualizer(scene);
 scene.background = new THREE.Color(settings.bgColor);
 
 const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 20.0);
@@ -243,21 +250,9 @@ console.log(
 
 // setExpression defined above with capability check
 
-const btnLoadGyaru = document.getElementById('btn-load-gyaru');
 const btnLoadSample = document.getElementById('btn-load-sample');
 
-function updateActiveModelButton(activeModel: 'gyaru' | 'sample' | 'custom') {
-  if (btnLoadGyaru) {
-    if (activeModel === 'gyaru') {
-      btnLoadGyaru.classList.add('active-model-btn');
-      btnLoadGyaru.style.border = '1.5px solid var(--accent-primary)';
-      btnLoadGyaru.style.background = 'rgba(99, 102, 241, 0.15)';
-    } else {
-      btnLoadGyaru.classList.remove('active-model-btn');
-      btnLoadGyaru.style.border = '1px solid rgba(255, 255, 255, 0.1)';
-      btnLoadGyaru.style.background = 'rgba(255, 255, 255, 0.04)';
-    }
-  }
+function updateActiveModelButton(activeModel: 'sample' | 'custom') {
   if (btnLoadSample) {
     if (activeModel === 'sample') {
       btnLoadSample.classList.add('active-model-btn');
@@ -271,20 +266,27 @@ function updateActiveModelButton(activeModel: 'gyaru' | 'sample' | 'custom') {
   }
 }
 
-if (btnLoadGyaru) {
-  btnLoadGyaru.addEventListener('click', () => {
-    updateActiveModelButton('gyaru');
-    loadVRM('/models/gyaru.vrm', 'Розовая Гяру');
-  });
-}
-
 if (btnLoadSample) {
   btnLoadSample.addEventListener('click', () => {
     updateActiveModelButton('sample');
-    loadVRM('/models/sample.vrm', 'Базовая модель');
+    loadVRM('/models/sample.vrm', 'Базовый VRM');
   });
 }
 
+// Setup Legacy Arm Tracking toggle UI
+const toggleLegacyArms = document.getElementById('toggle-legacy-arms') as HTMLInputElement | null;
+if (toggleLegacyArms) {
+  toggleLegacyArms.checked = settings.legacyArmTracking;
+  const legacyEls = document.querySelectorAll('.legacy-arm-control');
+  legacyEls.forEach(el => (el as HTMLElement).style.display = settings.legacyArmTracking ? 'block' : 'none');
+
+  toggleLegacyArms.addEventListener('change', (e) => {
+    settings.legacyArmTracking = (e.target as HTMLInputElement).checked;
+    legacyEls.forEach(el => (el as HTMLElement).style.display = settings.legacyArmTracking ? 'block' : 'none');
+  });
+}
+
+loadVRM('/models/sample.vrm', 'Базовый VRM');
 
 /* ==========================================================================
    AVATAR REAL SKELETON ARM LENGTHS (STAGE 1)
@@ -362,6 +364,8 @@ function loadVRM(url: string, name = 'Sample Model') {
       updateModelCapabilities();
       applyRestingPose();
       computeAvatarArmLengths();
+      armRigLeft.initFromVRM(vrm);
+      armRigRight.initFromVRM(vrm);
 
       modelStatusText.textContent = `Модель: ${name} ${isArkitModel ? '(ARKit 52 ✨)' : ''}`;
       console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
@@ -381,7 +385,7 @@ console.log('Loaded VRM successfully:', vrm);
 }
 
 // Load default active avatar: Gyaru (ARKit 52 Perfect Sync)
-loadVRM('/models/gyaru.vrm', 'Розовая Гяру');
+loadVRM('/models/sample.vrm', 'Базовый VRM');
 
 
 /* ==========================================================================
@@ -897,6 +901,9 @@ export function toggleDebugMode() {
   if (!isDebugEnabled) {
     updateDebugSpheres();
   }
+  if (armDebugVisualizer) {
+    armDebugVisualizer.setVisible(isDebugEnabled);
+  }
 }
 
 export const elbowFilters = {
@@ -919,7 +926,7 @@ export const faceTouchState: { left: FaceTouchState; right: FaceTouchState } = {
   right: { isActive: false, weight: 0.0, lastTimestamp: 0 },
 };
 
-function solveArmVectorIK(
+export function solveArmVectorIK(
   targetSide: 'left' | 'right',
   S3d: { x: number; y: number; z: number },
   E3d: { x: number; y: number; z: number },
@@ -1768,32 +1775,107 @@ function onHolisticResults(results: any) {
       const w15 = getValidPoseLandmark(15, pl, wl);
       const w16 = getValidPoseLandmark(16, pl, wl);
 
-      // User Right Arm (Filtered with 1€ Filter)
-      if (settings.rightHand && isRightActive) {
-        const filteredE14 = elbowFilters.right.filter(e14, now);
-        const filteredW16 = wristFilters.right.filter(w16, now);
-        solveArmVectorIK(targetRightArm, s12, filteredE14, filteredW16, activeRightHandLM, true, results.faceLandmarks, armScale, pl[12]?.visibility ?? 1.0, pl[14]?.visibility ?? 1.0);
-        updateHandBadge(rightHandBadge, true);
-      } else {
-        lastValidRightHandLM = null;
-        elbowFilters.right.reset();
-        wristFilters.right.reset();
-        resetEntireArmToIdle(targetRightArm);
-        updateHandBadge(rightHandBadge, false);
-      }
+      if (!settings.legacyArmTracking) {
+        // MODERN FORWARD KINEMATICS (FK) ARM RIG (Stages 1-6)
+        const targetRight = settings.mirror ? 'right' : 'left';
 
-      // User Left Arm (Filtered with 1€ Filter)
-      if (settings.leftHand && isLeftActive) {
-        const filteredE13 = elbowFilters.left.filter(e13, now);
-        const filteredW15 = wristFilters.left.filter(w15, now);
-        solveArmVectorIK(targetLeftArm, s11, filteredE13, filteredW15, activeLeftHandLM, false, results.faceLandmarks, armScale, pl[11]?.visibility ?? 1.0, pl[13]?.visibility ?? 1.0);
-        updateHandBadge(leftHandBadge, true);
+        const userRightShoulder = pl ? pl[12] : null;
+        const userRightElbow = pl ? pl[14] : null;
+        const userRightWrist = pl ? pl[16] : null;
+
+        const userLeftShoulder = pl ? pl[11] : null;
+        const userLeftElbow = pl ? pl[13] : null;
+        const userLeftWrist = pl ? pl[15] : null;
+
+        if (targetRight === 'right') {
+          if (settings.rightHand) {
+            armRigRight.update(
+              currentVrm,
+              userRightShoulder, userRightElbow, userRightWrist,
+              results.rightHandLandmarks,
+              pl ? [pl[20], pl[18]] : null,
+              settings.mirror,
+              now,
+              settings.handSens
+            );
+          } else {
+            armRigRight.applyIdlePose(currentVrm, 0.15);
+          }
+          if (settings.leftHand) {
+            armRigLeft.update(
+              currentVrm,
+              userLeftShoulder, userLeftElbow, userLeftWrist,
+              results.leftHandLandmarks,
+              pl ? [pl[19], pl[17]] : null,
+              settings.mirror,
+              now,
+              settings.handSens
+            );
+          } else {
+            armRigLeft.applyIdlePose(currentVrm, 0.15);
+          }
+        } else {
+          if (settings.rightHand) {
+            armRigLeft.update(
+              currentVrm,
+              userRightShoulder, userRightElbow, userRightWrist,
+              results.rightHandLandmarks,
+              pl ? [pl[20], pl[18]] : null,
+              settings.mirror,
+              now,
+              settings.handSens
+            );
+          } else {
+            armRigLeft.applyIdlePose(currentVrm, 0.15);
+          }
+          if (settings.leftHand) {
+            armRigRight.update(
+              currentVrm,
+              userLeftShoulder, userLeftElbow, userLeftWrist,
+              results.leftHandLandmarks,
+              pl ? [pl[19], pl[17]] : null,
+              settings.mirror,
+              now,
+              settings.handSens
+            );
+          } else {
+            armRigRight.applyIdlePose(currentVrm, 0.15);
+          }
+        }
+
+        updateHandBadge(rightHandBadge, armRigRight.state === 'ACTIVE');
+        updateHandBadge(leftHandBadge, armRigLeft.state === 'ACTIVE');
+
+        if (armDebugVisualizer) {
+          armDebugVisualizer.update(armRigLeft, armRigRight);
+        }
       } else {
-        lastValidLeftHandLM = null;
-        elbowFilters.left.reset();
-        wristFilters.left.reset();
-        resetEntireArmToIdle(targetLeftArm);
-        updateHandBadge(leftHandBadge, false);
+        // LEGACY ARM TRACKING (Two-Bone Positional IK + Face-Touch Engine)
+        if (settings.rightHand && isRightActive) {
+          const filteredE14 = elbowFilters.right.filter(e14, now);
+          const filteredW16 = wristFilters.right.filter(w16, now);
+          solveArmVectorIKLegacy(currentVrm, targetRightArm, s12, filteredE14, filteredW16, activeRightHandLM, true, results.faceLandmarks, armScale, pl[12]?.visibility ?? 1.0, pl[14]?.visibility ?? 1.0, settings.reachMultiplier);
+          updateHandBadge(rightHandBadge, true);
+        } else {
+          lastValidRightHandLM = null;
+          elbowFilters.right.reset();
+          wristFilters.right.reset();
+          resetEntireArmToIdle(targetRightArm);
+          updateHandBadge(rightHandBadge, false);
+        }
+
+        if (settings.leftHand && isLeftActive) {
+          const filteredE13 = elbowFilters.left.filter(e13, now);
+          const filteredW15 = wristFilters.left.filter(w15, now);
+          solveArmVectorIKLegacy(currentVrm, targetLeftArm, s11, filteredE13, filteredW15, activeLeftHandLM, false, results.faceLandmarks, armScale, pl[11]?.visibility ?? 1.0, pl[13]?.visibility ?? 1.0, settings.reachMultiplier);
+          updateHandBadge(leftHandBadge, true);
+        } else {
+          lastValidLeftHandLM = null;
+          elbowFilters.left.reset();
+          wristFilters.left.reset();
+          resetEntireArmToIdle(targetLeftArm);
+          updateHandBadge(leftHandBadge, false);
+        }
       }
     }
   } else {
@@ -1815,6 +1897,18 @@ function onHolisticResults(results: any) {
     const ftEl = document.getElementById('dbg-ft-w');
     const shVisEl = document.getElementById('dbg-sh-vis');
     const elVisEl = document.getElementById('dbg-el-vis');
+
+    const modeEl = document.getElementById('dbg-arm-mode');
+    const stateLEl = document.getElementById('dbg-state-left');
+    const stateREl = document.getElementById('dbg-state-right');
+    const elbowAnglesEl = document.getElementById('dbg-elbow-angles');
+    const wristVisEl = document.getElementById('dbg-wrist-vis');
+
+    if (modeEl) modeEl.textContent = settings.legacyArmTracking ? 'Legacy 2-Bone IK' : 'FK Modern (Direction-Based)';
+    if (stateLEl) stateLEl.textContent = armRigLeft.state;
+    if (stateREl) stateREl.textContent = armRigRight.state;
+    if (elbowAnglesEl) elbowAnglesEl.textContent = Math.round(armRigLeft.debugInfo.elbowAngleDeg) + '° / ' + Math.round(armRigRight.debugInfo.elbowAngleDeg) + '°';
+    if (wristVisEl && pl) wristVisEl.textContent = ((pl[15]?.visibility ?? 0)).toFixed(2) + ' / ' + ((pl[16]?.visibility ?? 0)).toFixed(2);
 
     if (scaleEl) scaleEl.textContent = (lastGoodArmScale || 1.0).toFixed(2) + "x" + (calibratedArmScale ? " (calib)" : " (dyn)");
     if (fpsEl) fpsEl.textContent = (fpsVal ? fpsVal.textContent : "60") + " FPS (" + frameTime + "ms)";
@@ -1870,10 +1964,16 @@ async function initTracking() {
   }
 
   try {
+    let isHolisticBusy = false;
     cameraInstance = new window.Camera(videoElement, {
       onFrame: async () => {
-        if (isCameraRunning && holisticInstance) {
-          await holisticInstance.send({ image: videoElement });
+        if (isCameraRunning && holisticInstance && !isHolisticBusy) {
+          isHolisticBusy = true;
+          try {
+            await holisticInstance.send({ image: videoElement });
+          } catch (_) {} finally {
+            isHolisticBusy = false;
+          }
         }
       },
       width: 640,
