@@ -340,4 +340,72 @@ describe('User Requirements Verification Suite (v1.2.1)', () => {
     const lDir = new THREE.Vector3(1, 0, 0).applyQuaternion(lNode.quaternion);
     expect(lDir.y).toBeLessThan(0); // Downward orientation in resting A-pose
   });
+
+  it('5. Симметрия ладоней: правая и левая ладонь (пальцы вверх, ладонь к камере) дают симметричные ориентации кисти', () => {
+    const { vrm, bones } = createMockVRM();
+    const rigLeft = new ArmRig('left');
+    const rigRight = new ArmRig('right');
+    rigLeft.initFromVRM(vrm);
+    rigRight.initFromVRM(vrm);
+
+    // Left arm: forearm up
+    const sL: Landmark3D = { x: 0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const eL: Landmark3D = { x: 0.2, y: -0.4, z: -0.25, visibility: 1.0 };
+    const wL: Landmark3D = { x: 0.2, y: -0.65, z: -0.25, visibility: 1.0 };
+
+    // Hand landmarks for Left hand (palm to camera, fingers up)
+    // Left hand: index is at smaller X, pinky is at larger X
+    const hL: Landmark3D[] = new Array(21).fill(null).map(() => ({ x: 0.2, y: -0.65, z: -0.25 }));
+    hL[0] = { x: 0.2, y: -0.65, z: -0.25 };
+    hL[5] = { x: 0.17, y: -0.75, z: -0.25 };
+    hL[17] = { x: 0.23, y: -0.75, z: -0.25 };
+
+    // Right arm: forearm up
+    const sR: Landmark3D = { x: -0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const eR: Landmark3D = { x: -0.2, y: -0.4, z: -0.25, visibility: 1.0 };
+    const wR: Landmark3D = { x: -0.2, y: -0.65, z: -0.25, visibility: 1.0 };
+
+    // Hand landmarks for Right hand (palm to camera, fingers up)
+    // Right hand: index is at larger X, pinky is at smaller X
+    const hR: Landmark3D[] = new Array(21).fill(null).map(() => ({ x: -0.2, y: -0.65, z: -0.25 }));
+    hR[0] = { x: -0.2, y: -0.65, z: -0.25 };
+    hR[5] = { x: -0.17, y: -0.75, z: -0.25 };
+    hR[17] = { x: -0.23, y: -0.75, z: -0.25 };
+
+    for (let t = 0; t < 15; t++) {
+      rigLeft.update(vrm, sL, eL, wL, hL, null, true, 1000 + t * 16, 1.0);
+      rigRight.update(vrm, sR, eR, wR, hR, null, true, 1000 + t * 16, 1.0);
+    }
+
+    const hNodeLeft = bones['leftHand'];
+    const hNodeRight = bones['rightHand'];
+
+    const leftWorldQ = new THREE.Quaternion();
+    const rightWorldQ = new THREE.Quaternion();
+    hNodeLeft.getWorldQuaternion(leftWorldQ);
+    hNodeRight.getWorldQuaternion(rightWorldQ);
+
+    const leftFingers = new THREE.Vector3(1, 0, 0).applyQuaternion(leftWorldQ);
+    const rightFingers = new THREE.Vector3(-1, 0, 0).applyQuaternion(rightWorldQ);
+
+    // Both hands MUST have fingers pointing UP (+Y)
+    expect(leftFingers.y).toBeGreaterThan(0.85);
+    expect(rightFingers.y).toBeGreaterThan(0.85);
+
+    // Neither hand is horizontal (X close to 0)
+    expect(Math.abs(leftFingers.x)).toBeLessThan(0.3);
+    expect(Math.abs(rightFingers.x)).toBeLessThan(0.3);
+
+    // Palm normals MUST point towards camera (+Z)
+    const leftPalm = new THREE.Vector3(0, -1, 0).applyQuaternion(leftWorldQ);
+    const rightPalm = new THREE.Vector3(0, -1, 0).applyQuaternion(rightWorldQ);
+
+    expect(leftPalm.z).toBeGreaterThan(0.85);
+    expect(rightPalm.z).toBeGreaterThan(0.85);
+
+    // Bilateral mirror symmetry across sagittal plane
+    expect(leftFingers.x).toBeCloseTo(-rightFingers.x, 2);
+    expect(leftPalm.x).toBeCloseTo(-rightPalm.x, 2);
+    expect(leftPalm.z).toBeCloseTo(rightPalm.z, 2);
+  });
 });

@@ -31,6 +31,7 @@ export interface ArmDebugInfo {
   elbowVis: number;
   wristVis: number;
   elbowAngleDeg: number;
+  wristAngleDeg: number;
   trackedShoulder: THREE.Vector3;
   trackedElbow: THREE.Vector3;
   trackedWrist: THREE.Vector3;
@@ -213,9 +214,7 @@ export class ArmRig {
   private _parentInvQ = new THREE.Quaternion();
   private _upperWorldQ = new THREE.Quaternion();
   private _upperInvQ = new THREE.Quaternion();
-  private _lowerWorldQ = new THREE.Quaternion();
-  private _lowerInvQ = new THREE.Quaternion();
-  private _targetUpperQ = new THREE.Quaternion();
+      private _targetUpperQ = new THREE.Quaternion();
   private _targetLowerQ = new THREE.Quaternion();
   private _targetHandQ = new THREE.Quaternion();
   private _palmForward = new THREE.Vector3();
@@ -269,6 +268,7 @@ export class ArmRig {
       elbowVis: 0,
       wristVis: 0,
       elbowAngleDeg: 0,
+      wristAngleDeg: 0,
       trackedShoulder: new THREE.Vector3(),
       trackedElbow: new THREE.Vector3(),
       trackedWrist: new THREE.Vector3(),
@@ -454,23 +454,11 @@ export class ArmRig {
     this._upperInvQ.copy(this._upperWorldQ).invert();
 
     // 3. Lower Arm Local Rotation
-    // Convert lower arm target direction to upper arm's updated orientation
     this._dirLowerLocal.copy(this._dirLowerWorld).applyQuaternion(this._upperInvQ).normalize();
     this._targetLowerQ.setFromUnitVectors(this.restLowerArmDir, this._dirLowerLocal);
     if (!Number.isFinite(this._targetLowerQ.x)) {
       this._targetLowerQ.identity();
     }
-
-    // Blend Lower Arm with Idle A-pose
-    this._scratchQ1.setFromEuler(this.idleLowerEuler);
-    this._targetLowerQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
-    this.currentLowerQ.slerp(this._targetLowerQ, smoothFactor);
-    lNode.quaternion.copy(this.currentLowerQ);
-
-    // Update lNode world matrix immediately for hand calculations
-    lNode.updateWorldMatrix(true, false);
-    lNode.getWorldQuaternion(this._lowerWorldQ);
-    this._lowerInvQ.copy(this._lowerWorldQ).invert();
 
     // Populate debug points directly aligned over avatar shoulder
     uNode.getWorldPosition(this._avatarShoulderPos);
@@ -495,7 +483,6 @@ export class ArmRig {
         const midY = (p5.y + p17.y) * 0.5 - p0.y;
         const midZ = (p5.z + p17.z) * 0.5 - p0.z;
 
-        // Convert hand landmark delta to avatar world space
         const fX = mirror ? midX : -midX;
         const fY = -midY;
         const fZ = -midZ;
@@ -511,13 +498,19 @@ export class ArmRig {
           this._palmForward.normalize();
           this._palmSide.normalize();
 
-          // Palm normal = cross(forward, side)
-          this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
+          // Palm normal: perpendicular to palm surface (pointing towards camera +Z)
+          // For Left hand: cross(side, forward) points +Z
+          // For Right hand: cross(forward, side) points +Z
+          if (this.isLeft) {
+            this._palmNormal.crossVectors(this._palmSide, this._palmForward).normalize();
+          } else {
+            this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
+          }
           this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
 
           // In VRM 1.0 normalized humanoid rest T-pose:
-          // Left hand: fingers point +X, palm normal is -Y
-          // Right hand: fingers point -X, palm normal is -Y
+          // Left hand: fingers point +X, palm normal is -Y, thumb is +Z
+          // Right hand: fingers point -X, palm normal is -Y, thumb is +Z
           if (this.isLeft) {
             this._colX.copy(this._palmForward);
             this._colY.copy(this._palmNormal).negate();
@@ -532,7 +525,10 @@ export class ArmRig {
           this._targetHandQ.setFromRotationMatrix(this._palmRotMatrix);
 
           // Convert target hand world quaternion to lower arm local space
-          this._targetHandQ.premultiply(this._lowerInvQ);
+          // Note: lowerArm has orientation = parentWorldQ * targetUpperQ * targetLowerQ
+          this._scratchQ1.multiplyQuaternions(this._upperWorldQ, this._targetLowerQ);
+          this._scratchQ1.invert();
+          this._targetHandQ.premultiply(this._scratchQ1);
 
           if (Number.isFinite(this._targetHandQ.x)) {
             hasHandOrientation = true;
@@ -542,9 +538,12 @@ export class ArmRig {
     }
 
     if (!hasHandOrientation) {
-      // Fallback: keep hand aligned with lower arm
       this._targetHandQ.identity();
     }
+
+    // Compute wrist angle deviation relative to lower arm before twist (0° = straight)
+    const absW = Math.min(1.0, Math.abs(this._targetHandQ.w));
+    this.debugInfo.wristAngleDeg = THREE.MathUtils.radToDeg(2.0 * Math.acos(absW));
 
     // Distribute 50% forearm twist
     const boneAxis = this.restLowerArmDir;
@@ -554,14 +553,20 @@ export class ArmRig {
     );
     if (Number.isFinite(twistAngle)) {
       this._scratchQ1.setFromAxisAngle(boneAxis, twistAngle * 0.5);
-      this.currentLowerQ.multiply(this._scratchQ1);
-      lNode.quaternion.copy(this.currentLowerQ);
+      this._targetLowerQ.multiply(this._scratchQ1);
 
       this._scratchQ2.setFromAxisAngle(boneAxis, -twistAngle * 0.5);
       this._targetHandQ.multiply(this._scratchQ2);
     }
 
-    // Blend Hand with Idle
+    // Blend Lower Arm with Idle A-pose & apply smoothly
+    this._scratchQ1.setFromEuler(this.idleLowerEuler);
+    this._targetLowerQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
+    this.currentLowerQ.slerp(this._targetLowerQ, smoothFactor);
+    lNode.quaternion.copy(this.currentLowerQ);
+    lNode.updateWorldMatrix(true, false);
+
+    // Blend Hand with Idle & apply smoothly
     this._scratchQ1.setFromEuler(this.idleHandEuler);
     this._targetHandQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
     this.currentHandQ.slerp(this._targetHandQ, smoothFactor);

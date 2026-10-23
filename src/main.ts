@@ -1,6 +1,6 @@
 ﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log(
-  '%c VTuber Studio PRO %c v1.2.1 build 2026-10-23 23:30 %c feature/arm-tracking-rewrite ',
+  '%c VTuber Studio PRO %c v1.2.2 build 2026-10-23 23:50 %c feature/arm-tracking-rewrite ',
   'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
   'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
   'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
@@ -663,28 +663,10 @@ function getAvatarShoulderWidth(): number {
    ========================================================================== */
 export const shoulderSamples: number[] = [];
 export const MAX_SHOULDER_SAMPLES = 120; // ~2 seconds of history at 60 FPS
-export let calibratedArmScale: number | null = null;
 export let lastGoodUserShoulderWidth: number = 0.32;
 export let lastGoodArmScale: number = 1.0;
-let isCalibrating = false;
-
-// Restore saved calibration from localStorage
-try {
-  const saved = localStorage.getItem('vtuber_calibration');
-  if (saved) {
-    const data = JSON.parse(saved);
-    if (typeof data.scale === 'number' && Number.isFinite(data.scale) && data.scale >= 0.8 && data.scale <= 1.3) {
-      calibratedArmScale = data.scale;
-      console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
-console.log("[Calibration] Loaded from localStorage: scale=" + (data.scale as number).toFixed(2) + "x");
-    }
-  }
-} catch (_) {}
 
 export function computeArmScale(userShoulderWidth: number | null): number {
-  if (calibratedArmScale !== null) {
-    return calibratedArmScale;
-  }
   if (userShoulderWidth !== null && Number.isFinite(userShoulderWidth) && userShoulderWidth > 0.08 && userShoulderWidth < 1.5) {
     shoulderSamples.push(userShoulderWidth);
     if (shoulderSamples.length > MAX_SHOULDER_SAMPLES) {
@@ -693,14 +675,14 @@ export function computeArmScale(userShoulderWidth: number | null): number {
   }
   if (shoulderSamples.length > 0) {
     const sorted = [...shoulderSamples].sort((a, b) => a - b);
-    const medianWidth = sorted[Math.floor(sorted.length / 2)];
-    lastGoodUserShoulderWidth = medianWidth;
+    const medianUser = sorted[Math.floor(sorted.length / 2)];
+    lastGoodUserShoulderWidth = medianUser;
     const avatarWidth = getAvatarShoulderWidth();
-    const rawScale = avatarWidth / (medianWidth > 1e-4 ? medianWidth : 0.32);
-    lastGoodArmScale = THREE.MathUtils.clamp(rawScale, 0.8, 1.3);
-    return lastGoodArmScale;
+    const rawScale = avatarWidth / medianUser;
+    const scale = THREE.MathUtils.clamp(rawScale, 0.8, 1.4);
+    lastGoodArmScale = scale;
+    return scale;
   }
-  // If no data, use last good value, and if none, scale = 1
   return lastGoodArmScale || 1.0;
 }
 
@@ -1734,8 +1716,7 @@ function onHolisticResults(results: any) {
   // Update Debug HUD if active (Stage 8)
   if (isDebugEnabled) {
     const frameTime = (performance.now() - frameStartTime).toFixed(1);
-    const scaleEl = document.getElementById('dbg-scale');
-    const fpsEl = document.getElementById('dbg-fps');
+        const fpsEl = document.getElementById('dbg-fps');
     const shAvEl = document.getElementById('dbg-sh-avatar');
     const shUsEl = document.getElementById('dbg-sh-user');
     const lAvEl = document.getElementById('dbg-l-avatar');
@@ -1754,10 +1735,11 @@ function onHolisticResults(results: any) {
     if (stateLEl) stateLEl.textContent = armRigLeft.state;
     if (stateREl) stateREl.textContent = armRigRight.state;
     if (elbowAnglesEl) elbowAnglesEl.textContent = Math.round(armRigLeft.debugInfo.elbowAngleDeg) + '° / ' + Math.round(armRigRight.debugInfo.elbowAngleDeg) + '°';
+    const wristAnglesEl = document.getElementById('dbg-wrist-angles');
+    if (wristAnglesEl) wristAnglesEl.textContent = Math.round(armRigLeft.debugInfo.wristAngleDeg) + '° / ' + Math.round(armRigRight.debugInfo.wristAngleDeg) + '°';
     if (wristVisEl && pl) wristVisEl.textContent = ((pl[15]?.visibility ?? 0)).toFixed(2) + ' / ' + ((pl[16]?.visibility ?? 0)).toFixed(2);
 
-    if (scaleEl) scaleEl.textContent = (lastGoodArmScale || 1.0).toFixed(2) + "x" + (calibratedArmScale ? " (calib)" : " (dyn)");
-    if (fpsEl) fpsEl.textContent = (fpsVal ? fpsVal.textContent : "60") + " FPS (" + frameTime + "ms)";
+        if (fpsEl) fpsEl.textContent = (fpsVal ? fpsVal.textContent : "60") + " FPS (" + frameTime + "ms)";
     if (shAvEl) shAvEl.textContent = (getAvatarShoulderWidth() * 100).toFixed(0) + " cm";
     if (shUsEl) shUsEl.textContent = (lastGoodUserShoulderWidth * 100).toFixed(0) + " cm";
     if (lAvEl) lAvEl.textContent = (avatarArmLengths.left.total * 100).toFixed(0) + "cm / " + (avatarArmLengths.right.total * 100).toFixed(0) + "cm";
@@ -1791,11 +1773,11 @@ async function initTracking() {
   });
 
   holisticInstance.setOptions({
-    modelComplexity: 1,
+    modelComplexity: 0,
     smoothLandmarks: true,
     enableSegmentation: false,
     smoothSegmentation: false,
-    refineFaceLandmarks: true,
+    refineFaceLandmarks: false,
     minDetectionConfidence: 0.5,
     minTrackingConfidence: 0.5,
   });
@@ -1990,61 +1972,6 @@ function updateAudioLipSync() {
    UI EVENT HANDLERS
    ========================================================================== */
 const cameraBtn = document.getElementById('btn-start-camera')!;
-const btnCalibrate = document.getElementById('btn-calibrate-scale');
-if (btnCalibrate) {
-  // Restore button text if calibrated on load
-  if (calibratedArmScale !== null) {
-    const btnText = document.getElementById('calibrate-btn-text');
-    if (btnText && calibratedArmScale !== null) btnText.textContent = "Калибровка (" + calibratedArmScale.toFixed(2) + "x ✓)";
-  }
-
-  btnCalibrate.addEventListener('click', () => {
-    if (isCalibrating) return;
-    if (!isCameraRunning) {
-      showEmotionToast('⚠️', 'Калибровка', 'Сначала включите камеру');
-      return;
-    }
-
-    isCalibrating = true;
-    let countdown = 3;
-    const btnText = document.getElementById('calibrate-btn-text');
-    if (btnText) btnText.textContent = "Калибровка через " + countdown + "...";
-    showEmotionToast('⏱️', 'Калибровка масштаба', "Примите Т-позу! Фиксация через " + countdown + " сек...");
-
-    const intervalId = window.setInterval(() => {
-      countdown--;
-      if (countdown > 0) {
-        if (btnText) btnText.textContent = "Калибровка через " + countdown + "...";
-        showEmotionToast('⏱️', 'Калибровка масштаба', "Примите Т-позу! Фиксация через " + countdown + " сек...");
-      } else {
-        window.clearInterval(intervalId);
-        isCalibrating = false;
-
-        const avatarWidth = getAvatarShoulderWidth();
-        let measuredShoulder = lastGoodUserShoulderWidth;
-        if (shoulderSamples.length >= 3) {
-          const sorted = [...shoulderSamples].sort((a, b) => a - b);
-          measuredShoulder = sorted[Math.floor(sorted.length / 2)];
-        }
-
-        calibratedArmScale = THREE.MathUtils.clamp(avatarWidth / (measuredShoulder > 1e-4 ? measuredShoulder : 0.32), 0.8, 1.3);
-
-        try {
-          localStorage.setItem('vtuber_calibration', JSON.stringify({
-            scale: calibratedArmScale,
-            shoulderWidthUser: measuredShoulder,
-            shoulderWidthAvatar: avatarWidth,
-            timestamp: Date.now(),
-          }));
-        } catch (_) {}
-
-        if (btnText) btnText.textContent = "Калибровка (" + calibratedArmScale.toFixed(2) + "x ✓)";
-        showEmotionToast('✨', 'Калибровка завершена', "Ширина плеч: " + (measuredShoulder * 100).toFixed(0) + " см | Масштаб: " + (calibratedArmScale ?? 1.0).toFixed(2) + "x (сохранено)");
-      }
-    }, 1000);
-  });
-}
-
 cameraBtn.addEventListener('click', () => {
   if (!isCameraRunning) {
     initTracking();
