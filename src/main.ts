@@ -825,6 +825,57 @@ export interface FaceTouchState {
    1€ FILTERS FOR ELBOW & WRIST POSITIONS (STAGE 7)
    minCutoff: 1.2 Hz (smooth at low speeds), beta: 0.02 (zero latency at fast speed)
    ========================================================================== */
+
+/* ==========================================================================
+   DEBUG MODE HUD & 3D TARGET SPHERES (STAGE 8)
+   ========================================================================== */
+export let isDebugEnabled = false;
+let debugWristSphereL: THREE.Mesh | null = null;
+let debugWristSphereR: THREE.Mesh | null = null;
+
+export function updateDebugSpheres(leftTarget?: THREE.Vector3, rightTarget?: THREE.Vector3) {
+  if (!isDebugEnabled) {
+    if (debugWristSphereL) debugWristSphereL.visible = false;
+    if (debugWristSphereR) debugWristSphereR.visible = false;
+    return;
+  }
+  if (!debugWristSphereL) {
+    const geo = new THREE.SphereGeometry(0.022, 12, 12);
+    const matL = new THREE.MeshBasicMaterial({ color: 0x06b6d4, wireframe: true });
+    debugWristSphereL = new THREE.Mesh(geo, matL);
+    scene.add(debugWristSphereL);
+
+    const matR = new THREE.MeshBasicMaterial({ color: 0xec4899, wireframe: true });
+    debugWristSphereR = new THREE.Mesh(geo, matR);
+    scene.add(debugWristSphereR);
+  }
+  if (leftTarget && debugWristSphereL) {
+    debugWristSphereL.position.copy(leftTarget);
+    debugWristSphereL.visible = true;
+  }
+  if (rightTarget && debugWristSphereR) {
+    debugWristSphereR.position.copy(rightTarget);
+    debugWristSphereR.visible = true;
+  }
+}
+
+export function toggleDebugMode() {
+  isDebugEnabled = !isDebugEnabled;
+  const panel = document.getElementById('debug-panel');
+  if (panel) {
+    if (isDebugEnabled) panel.classList.remove('hidden');
+    else panel.classList.add('hidden');
+  }
+  const btn = document.getElementById('btn-toggle-debug');
+  if (btn) {
+    if (isDebugEnabled) btn.classList.add('active');
+    else btn.classList.remove('active');
+  }
+  if (!isDebugEnabled) {
+    updateDebugSpheres();
+  }
+}
+
 export const elbowFilters = {
   left: new OneEuroFilter3D(1.2, 0.02, 1.0),
   right: new OneEuroFilter3D(1.2, 0.02, 1.0),
@@ -981,6 +1032,10 @@ function solveArmVectorIK(
   const resolvedWristPos = settings.armCollision
     ? resolveBodyColliders(targetWristPos, 0.02, true, ftState.weight)
     : targetWristPos;
+  if (isDebugEnabled) {
+    if (isLeft) updateDebugSpheres(resolvedWristPos, undefined);
+    else updateDebugSpheres(undefined, resolvedWristPos);
+  }
 
   // 4. Reach vector and distance clamping (max 0.98 * (L1 + L2) to prevent locking!)
   const vReach = new THREE.Vector3().subVectors(resolvedWristPos, shoulderPos);
@@ -1318,6 +1373,7 @@ function drawLandmarkSkeleton(results: any) {
 
 // MediaPipe Results Processing
 function onHolisticResults(results: any) {
+  const frameStartTime = performance.now();
   drawLandmarkSkeleton(results);
 
   if (!currentVrm) return;
@@ -1718,10 +1774,41 @@ function onHolisticResults(results: any) {
       }
     }
   } else {
-    resetEntireArmToIdle('left');
+        resetEntireArmToIdle('left');
     resetEntireArmToIdle('right');
     updateHandBadge(leftHandBadge, false);
     updateHandBadge(rightHandBadge, false);
+  }
+
+  // Update Debug HUD if active (Stage 8)
+  if (isDebugEnabled) {
+    const frameTime = (performance.now() - frameStartTime).toFixed(1);
+    const scaleEl = document.getElementById('dbg-scale');
+    const fpsEl = document.getElementById('dbg-fps');
+    const shAvEl = document.getElementById('dbg-sh-avatar');
+    const shUsEl = document.getElementById('dbg-sh-user');
+    const lAvEl = document.getElementById('dbg-l-avatar');
+    const lUsEl = document.getElementById('dbg-l-user');
+    const ftEl = document.getElementById('dbg-ft-w');
+    const shVisEl = document.getElementById('dbg-sh-vis');
+    const elVisEl = document.getElementById('dbg-el-vis');
+
+    if (scaleEl) scaleEl.textContent = (lastGoodArmScale || 1.0).toFixed(2) + "x" + (calibratedArmScale ? " (calib)" : " (dyn)");
+    if (fpsEl) fpsEl.textContent = (fpsVal ? fpsVal.textContent : "60") + " FPS (" + frameTime + "ms)";
+    if (shAvEl) shAvEl.textContent = (getAvatarShoulderWidth() * 100).toFixed(0) + " cm";
+    if (shUsEl) shUsEl.textContent = (lastGoodUserShoulderWidth * 100).toFixed(0) + " cm";
+    if (lAvEl) lAvEl.textContent = (avatarArmLengths.left.total * 100).toFixed(0) + "cm / " + (avatarArmLengths.right.total * 100).toFixed(0) + "cm";
+
+    // User Arm lengths from Pose
+    if (pl && pl[11] && pl[13] && pl[15] && pl[12] && pl[14] && pl[16]) {
+      const lUserLeft = (Math.hypot(pl[11].x - pl[13].x, pl[11].y - pl[13].y) + Math.hypot(pl[13].x - pl[15].x, pl[13].y - pl[15].y)) * 100;
+      const lUserRight = (Math.hypot(pl[12].x - pl[14].x, pl[12].y - pl[14].y) + Math.hypot(pl[14].x - pl[16].x, pl[14].y - pl[16].y)) * 100;
+      if (lUsEl) lUsEl.textContent = lUserLeft.toFixed(0) + "cm / " + lUserRight.toFixed(0) + "cm";
+    }
+
+    if (ftEl) ftEl.textContent = faceTouchState.left.weight.toFixed(2) + " / " + faceTouchState.right.weight.toFixed(2);
+    if (shVisEl && pl) shVisEl.textContent = ((pl[11]?.visibility ?? 0)).toFixed(2) + " / " + ((pl[12]?.visibility ?? 0)).toFixed(2);
+    if (elVisEl && pl) elVisEl.textContent = ((pl[13]?.visibility ?? 0)).toFixed(2) + " / " + ((pl[14]?.visibility ?? 0)).toFixed(2);
   }
 }
 /* ==========================================================================
@@ -2166,6 +2253,11 @@ document.querySelectorAll('.bg-btn').forEach((btn) => {
       document.body.style.backgroundColor = color;
     }
   });
+});
+
+
+document.getElementById('btn-toggle-debug')?.addEventListener('click', () => {
+  toggleDebugMode();
 });
 
 // Recalibrate / Reset Center
