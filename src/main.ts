@@ -1,6 +1,6 @@
 ﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log(
-  '%c VTuber Studio PRO %c v1.2.2 build 2026-10-23 23:50 %c feature/arm-tracking-rewrite ',
+  '%c VTuber Studio PRO %c v1.2.4 build 2026-10-24 00:25 %c feature/arm-tracking-rewrite ',
   'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
   'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
   'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
@@ -1737,6 +1737,8 @@ function onHolisticResults(results: any) {
     if (elbowAnglesEl) elbowAnglesEl.textContent = Math.round(armRigLeft.debugInfo.elbowAngleDeg) + '° / ' + Math.round(armRigRight.debugInfo.elbowAngleDeg) + '°';
     const wristAnglesEl = document.getElementById('dbg-wrist-angles');
     if (wristAnglesEl) wristAnglesEl.textContent = Math.round(armRigLeft.debugInfo.wristAngleDeg) + '° / ' + Math.round(armRigRight.debugInfo.wristAngleDeg) + '°';
+    const wristFlexEl = document.getElementById('dbg-wrist-flex');
+    if (wristFlexEl) wristFlexEl.textContent = armRigLeft.debugInfo.wristFlexIndicator + ' / ' + armRigRight.debugInfo.wristFlexIndicator;
     if (wristVisEl && pl) wristVisEl.textContent = ((pl[15]?.visibility ?? 0)).toFixed(2) + ' / ' + ((pl[16]?.visibility ?? 0)).toFixed(2);
 
         if (fpsEl) fpsEl.textContent = (fpsVal ? fpsVal.textContent : "60") + " FPS (" + frameTime + "ms)";

@@ -32,6 +32,8 @@ export interface ArmDebugInfo {
   wristVis: number;
   elbowAngleDeg: number;
   wristAngleDeg: number;
+  wristFlexDeg: number;
+  wristFlexIndicator: string;
   trackedShoulder: THREE.Vector3;
   trackedElbow: THREE.Vector3;
   trackedWrist: THREE.Vector3;
@@ -227,6 +229,9 @@ export class ArmRig {
   private _scratchQ1 = new THREE.Quaternion();
   private _scratchQ2 = new THREE.Quaternion();
   private _scratchV1 = new THREE.Vector3();
+  private _p0World = new THREE.Vector3();
+  private _p5World = new THREE.Vector3();
+  private _p17World = new THREE.Vector3();
   private _avatarShoulderPos = new THREE.Vector3();
 
   // Debug data
@@ -269,6 +274,8 @@ export class ArmRig {
       wristVis: 0,
       elbowAngleDeg: 0,
       wristAngleDeg: 0,
+      wristFlexDeg: 0,
+      wristFlexIndicator: '0° •',
       trackedShoulder: new THREE.Vector3(),
       trackedElbow: new THREE.Vector3(),
       trackedWrist: new THREE.Vector3(),
@@ -478,35 +485,40 @@ export class ArmRig {
       const p17 = handLandmarks[17]; // Pinky MCP
 
       if (p0 && p5 && p17) {
-        // Forward vector = from wrist to finger bases midpoint
-        const midX = (p5.x + p17.x) * 0.5 - p0.x;
-        const midY = (p5.y + p17.y) * 0.5 - p0.y;
-        const midZ = (p5.z + p17.z) * 0.5 - p0.z;
+        // Convert landmarks via unified coordinate transform (Z inverted once towards camera +Z)
+        convertPoseWorldLandmark(p0, mirror, this._p0World);
+        convertPoseWorldLandmark(p5, mirror, this._p5World);
+        convertPoseWorldLandmark(p17, mirror, this._p17World);
 
-        const fX = mirror ? midX : -midX;
-        const fY = -midY;
-        const fZ = -midZ;
-        this._palmForward.set(fX, fY, fZ);
+        // Forward vector = from wrist to finger bases midpoint
+        this._palmForward.set(
+          (this._p5World.x + this._p17World.x) * 0.5 - this._p0World.x,
+          (this._p5World.y + this._p17World.y) * 0.5 - this._p0World.y,
+          (this._p5World.z + this._p17World.z) * 0.5 - this._p0World.z
+        );
 
         // Side vector: from index to pinky
-        const sX = mirror ? (p17.x - p5.x) : -(p17.x - p5.x);
-        const sY = -(p17.y - p5.y);
-        const sZ = -(p17.z - p5.z);
-        this._palmSide.set(sX, sY, sZ);
+        this._palmSide.subVectors(this._p17World, this._p5World);
 
         if (this._palmForward.lengthSq() > 1e-4 && this._palmSide.lengthSq() > 1e-4) {
           this._palmForward.normalize();
           this._palmSide.normalize();
 
-          // Palm normal: perpendicular to palm surface (pointing towards camera +Z)
-          // For Left hand: cross(side, forward) points +Z
-          // For Right hand: cross(forward, side) points +Z
+          // Palm normal: perpendicular to palm surface (pointing towards camera +Z when palm faces viewer)
+          // For Left hand: cross(forward, side) points +Z towards camera
+          // For Right hand: cross(side, forward) points +Z towards camera
           if (this.isLeft) {
-            this._palmNormal.crossVectors(this._palmSide, this._palmForward).normalize();
-          } else {
             this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
+          } else {
+            this._palmNormal.crossVectors(this._palmSide, this._palmForward).normalize();
           }
-          this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
+
+          // Orthogonalize side vector
+          if (this.isLeft) {
+            this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
+          } else {
+            this._palmSide.crossVectors(this._palmForward, this._palmNormal).normalize();
+          }
 
           // In VRM 1.0 normalized humanoid rest T-pose:
           // Left hand: fingers point +X, palm normal is -Y, thumb is +Z
@@ -544,6 +556,15 @@ export class ArmRig {
     // Compute wrist angle deviation relative to lower arm before twist (0° = straight)
     const absW = Math.min(1.0, Math.abs(this._targetHandQ.w));
     this.debugInfo.wristAngleDeg = THREE.MathUtils.radToDeg(2.0 * Math.acos(absW));
+
+    // Compute signed wrist flexion: + for palmar flexion (towards palm), - for dorsiflexion (towards dorsal)
+    // In lower arm local space, restLowerArmDir is ±X, palmar side is -Y, dorsal side is +Y
+    this._scratchV1.copy(this.restLowerArmDir).applyQuaternion(this._targetHandQ);
+    const flexVal = THREE.MathUtils.clamp(-this._scratchV1.y, -1, 1);
+    this.debugInfo.wristFlexDeg = THREE.MathUtils.radToDeg(Math.asin(flexVal));
+    const flexSignStr = this.debugInfo.wristFlexDeg > 0 ? '+' : '';
+    const flexArrow = this.debugInfo.wristFlexDeg > 3 ? '↑' : (this.debugInfo.wristFlexDeg < -3 ? '↓' : '•');
+    this.debugInfo.wristFlexIndicator = flexSignStr + Math.round(this.debugInfo.wristFlexDeg) + '° ' + flexArrow;
 
     // Distribute 50% forearm twist
     const boneAxis = this.restLowerArmDir;
@@ -679,6 +700,9 @@ export class ArmRig {
     if (hNode) hNode.quaternion.copy(this.currentHandQ);
 
     this.debugInfo.elbowAngleDeg = 0;
+    this.debugInfo.wristAngleDeg = 0;
+    this.debugInfo.wristFlexDeg = 0;
+    this.debugInfo.wristFlexIndicator = '0° •';
   }
 
   public resetFilters() {

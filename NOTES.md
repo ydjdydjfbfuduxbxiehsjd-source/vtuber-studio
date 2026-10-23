@@ -198,3 +198,28 @@ if (this.isLeft) {
 2. **Добавлен угол кисти:**
    - В HUD добавлен параметр **`Wrist Bend (L / R)`** в градусах ($0^\circ$ — продолжение предплечья, отклонение при изгибе запястья).
 3. **Обновлена версия:** **`v1.2.2 build 2026-10-23 23:50`**.
+
+
+---
+
+# VTuber Studio Pro - Wrist Orientation Fix & HUD Flex Indicator (v1.2.4)
+
+## 1. Palm Normal 180-deg Flip Fix
+- All hand landmarks (0, 5, 17) are converted using convertPoseWorldLandmark (Z inverted once towards +Z, mirror does not affect Z).
+- Left hand normal: crossVectors(_palmForward, _palmSide) -> +Z towards camera.
+- Right hand normal: crossVectors(_palmSide, _palmForward) -> +Z towards camera.
+- Fingers tilt towards camera (+Z) when wrist flexes towards camera, matching user motion.
+
+## 2. Wrist Flexion / Extension in HUD (Wrist flex L / R)
+- In lower arm space, palmar side is -Y and dorsal side is +Y.
+- Flexion (+) towards palm indicated by arrow UP (e.g. +20 deg).
+- Extension (-) towards dorsal indicated by arrow DOWN (e.g. -15 deg).
+
+## 3. Unit Tests (28/28 passed)
+- Test 3a: Palm to camera, fingers up -> palm normal +Z in world space for both hands.
+- Test 3b: Wrist tilts to camera -> hand bone fingertips displaced towards camera (+Z), flex indicator (+).
+- Test 3c: Screen-plane tilt -> direction preserved.
+
+## 4. Unchanged Components & Build
+- Shoulder and elbow hinge kinematics unchanged.
+- Version: v1.2.4 build 2026-10-24 00:25.
