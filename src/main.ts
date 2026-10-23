@@ -745,28 +745,49 @@ function getAvatarShoulderWidth(): number {
   return 0.32;
 }
 
-const shoulderSamples: number[] = [];
-const MAX_SHOULDER_SAMPLES = 75; // ~2 seconds of history at 35-60 FPS
-let calibratedArmScale: number | null = null;
+/* ==========================================================================
+   USER SHOULDER SCALE & 2-SECOND MEDIAN FILTER (STAGE 2)
+   ========================================================================== */
+export const shoulderSamples: number[] = [];
+export const MAX_SHOULDER_SAMPLES = 120; // ~2 seconds of history at 60 FPS
+export let calibratedArmScale: number | null = null;
+export let lastGoodUserShoulderWidth: number = 0.32;
+export let lastGoodArmScale: number = 1.0;
+let isCalibrating = false;
 
-function computeArmScale(userShoulderWidth: number): number {
+// Restore saved calibration from localStorage
+try {
+  const saved = localStorage.getItem('vtuber_calibration');
+  if (saved) {
+    const data = JSON.parse(saved);
+    if (typeof data.scale === 'number' && Number.isFinite(data.scale) && data.scale >= 0.8 && data.scale <= 1.3) {
+      calibratedArmScale = data.scale;
+      console.log("[Calibration] Loaded from localStorage: scale=" + (data.scale as number).toFixed(2) + "x");
+    }
+  }
+} catch (_) {}
+
+export function computeArmScale(userShoulderWidth: number | null): number {
   if (calibratedArmScale !== null) {
     return calibratedArmScale;
   }
-  if (userShoulderWidth > 0.08 && userShoulderWidth < 1.5) {
+  if (userShoulderWidth !== null && Number.isFinite(userShoulderWidth) && userShoulderWidth > 0.08 && userShoulderWidth < 1.5) {
     shoulderSamples.push(userShoulderWidth);
     if (shoulderSamples.length > MAX_SHOULDER_SAMPLES) {
       shoulderSamples.shift();
     }
   }
-  let medianWidth = userShoulderWidth;
   if (shoulderSamples.length > 0) {
     const sorted = [...shoulderSamples].sort((a, b) => a - b);
-    medianWidth = sorted[Math.floor(sorted.length / 2)];
+    const medianWidth = sorted[Math.floor(sorted.length / 2)];
+    lastGoodUserShoulderWidth = medianWidth;
+    const avatarWidth = getAvatarShoulderWidth();
+    const rawScale = avatarWidth / (medianWidth > 1e-4 ? medianWidth : 0.32);
+    lastGoodArmScale = THREE.MathUtils.clamp(rawScale, 0.8, 1.3);
+    return lastGoodArmScale;
   }
-  const avatarWidth = getAvatarShoulderWidth();
-  const rawScale = avatarWidth / (medianWidth > 1e-4 ? medianWidth : 0.32);
-  return THREE.MathUtils.clamp(rawScale, 0.8, 1.3);
+  // If no data, use last good value, and if none, scale = 1
+  return lastGoodArmScale || 1.0;
 }
 
 function solveArmVectorIK(
@@ -1455,8 +1476,13 @@ function onHolisticResults(results: any) {
     const sMidX = (s11.x + s12.x) / 2;
     const sMidY = (s11.y + s12.y) / 2;
 
-    // Shoulder width in coronal plane & rolling median scale (0.8 - 1.3)
-    const userShoulderWidth = Math.hypot(s12.x - s11.x, s12.y - s11.y, (s12.z - s11.z) * 0.4);
+    // Shoulder width in coronal plane: only accept when visibility of both shoulders > 0.6
+    const vis11 = pl[11]?.visibility ?? 0;
+    const vis12 = pl[12]?.visibility ?? 0;
+    let userShoulderWidth: number | null = null;
+    if (vis11 > 0.6 && vis12 > 0.6) {
+      userShoulderWidth = Math.hypot(s12.x - s11.x, s12.y - s11.y, (s12.z - s11.z) * 0.4);
+    }
     const armScale = computeArmScale(userShoulderWidth);
 
     if (settings.torso) {
@@ -1799,22 +1825,56 @@ function updateAudioLipSync() {
 const cameraBtn = document.getElementById('btn-start-camera')!;
 const btnCalibrate = document.getElementById('btn-calibrate-scale');
 if (btnCalibrate) {
+  // Restore button text if calibrated on load
+  if (calibratedArmScale !== null) {
+    const btnText = document.getElementById('calibrate-btn-text');
+    if (btnText && calibratedArmScale !== null) btnText.textContent = "Калибровка (" + calibratedArmScale.toFixed(2) + "x ✓)";
+  }
+
   btnCalibrate.addEventListener('click', () => {
+    if (isCalibrating) return;
     if (!isCameraRunning) {
-      showEmotionToast('📷', 'Калибровка', 'Сначала запустите камеру');
+      showEmotionToast('⚠️', 'Калибровка', 'Сначала включите камеру');
       return;
     }
-    if (shoulderSamples.length >= 5) {
-      const sorted = [...shoulderSamples].sort((a, b) => a - b);
-      const medianWidth = sorted[Math.floor(sorted.length / 2)];
-      const avatarWidth = getAvatarShoulderWidth();
-      calibratedArmScale = THREE.MathUtils.clamp(avatarWidth / medianWidth, 0.8, 1.3);
-      showEmotionToast('🎯', 'Масштаб откалиброван', `Ширина плеч: ${(medianWidth * 100).toFixed(0)} см | Масштаб: ${calibratedArmScale.toFixed(2)}x`);
-      const btnText = document.getElementById('calibrate-btn-text');
-      if (btnText) btnText.textContent = `Калибровка (${calibratedArmScale.toFixed(2)}x)`;
-    } else {
-      showEmotionToast('⏳', 'Калибровка', 'Постойте прямо перед камерой еще 1 секунду...');
-    }
+
+    isCalibrating = true;
+    let countdown = 3;
+    const btnText = document.getElementById('calibrate-btn-text');
+    if (btnText) btnText.textContent = "Калибровка через " + countdown + "...";
+    showEmotionToast('⏱️', 'Калибровка масштаба', "Примите Т-позу! Фиксация через " + countdown + " сек...");
+
+    const intervalId = window.setInterval(() => {
+      countdown--;
+      if (countdown > 0) {
+        if (btnText) btnText.textContent = "Калибровка через " + countdown + "...";
+        showEmotionToast('⏱️', 'Калибровка масштаба', "Примите Т-позу! Фиксация через " + countdown + " сек...");
+      } else {
+        window.clearInterval(intervalId);
+        isCalibrating = false;
+
+        const avatarWidth = getAvatarShoulderWidth();
+        let measuredShoulder = lastGoodUserShoulderWidth;
+        if (shoulderSamples.length >= 3) {
+          const sorted = [...shoulderSamples].sort((a, b) => a - b);
+          measuredShoulder = sorted[Math.floor(sorted.length / 2)];
+        }
+
+        calibratedArmScale = THREE.MathUtils.clamp(avatarWidth / (measuredShoulder > 1e-4 ? measuredShoulder : 0.32), 0.8, 1.3);
+
+        try {
+          localStorage.setItem('vtuber_calibration', JSON.stringify({
+            scale: calibratedArmScale,
+            shoulderWidthUser: measuredShoulder,
+            shoulderWidthAvatar: avatarWidth,
+            timestamp: Date.now(),
+          }));
+        } catch (_) {}
+
+        if (btnText) btnText.textContent = "Калибровка (" + calibratedArmScale.toFixed(2) + "x ✓)";
+        showEmotionToast('✨', 'Калибровка завершена', "Ширина плеч: " + (measuredShoulder * 100).toFixed(0) + " см | Масштаб: " + (calibratedArmScale ?? 1.0).toFixed(2) + "x (сохранено)");
+      }
+    }, 1000);
   });
 }
 
