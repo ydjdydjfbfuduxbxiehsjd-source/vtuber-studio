@@ -373,6 +373,25 @@ function loadVRM(url: string, name = 'Sample Model') {
 // Load default active avatar: Gyaru (ARKit 52 Perfect Sync)
 loadVRM('/models/gyaru.vrm', 'Розовая Гяру');
 
+
+/* ==========================================================================
+   PERFORMANCE: REUSABLE SCRATCH OBJECTS (STAGE 9: ZERO ALLOCATIONS IN HOT LOOP)
+   ========================================================================== */
+const _scratchV1 = new THREE.Vector3();
+const _scratchV2 = new THREE.Vector3();
+const _scratchQ1 = new THREE.Quaternion();
+const _scratchQ2 = new THREE.Quaternion();
+const _scratchE1 = new THREE.Euler();
+const BEND_AXIS_Z_POS = new THREE.Vector3(0, 0, 1);
+const BEND_AXIS_Z_NEG = new THREE.Vector3(0, 0, -1);
+
+const _colHeadPos = new THREE.Vector3();
+const _colChestPos = new THREE.Vector3();
+const _colHipsPos = new THREE.Vector3();
+const _colVHead = new THREE.Vector3();
+const _colVAB = new THREE.Vector3();
+const _colCenter = new THREE.Vector3();
+
 /* ==========================================================================
    BONE RIGGING & HELPER FUNCTIONS
    ========================================================================== */
@@ -386,15 +405,11 @@ function rigRotation(
   const boneNode = currentVrm.humanoid.getNormalizedBoneNode(boneName);
   if (!boneNode) return;
 
-  const targetEuler = new THREE.Euler(
-    rotation.x * dampener,
-    rotation.y * dampener,
-    rotation.z * dampener,
-    'XYZ'
-  );
-  const targetQuat = new THREE.Quaternion().setFromEuler(targetEuler);
+  _scratchE1.set(rotation.x * dampener, rotation.y * dampener, rotation.z * dampener, 'XYZ');
+  _scratchQ1.setFromEuler(_scratchE1);
+
   const rate = lerpRate !== undefined ? lerpRate : 1 - settings.smoothing;
-  boneNode.quaternion.slerp(targetQuat, THREE.MathUtils.clamp(rate, 0.05, 0.8));
+  boneNode.quaternion.slerp(_scratchQ1, THREE.MathUtils.clamp(rate, 0.05, 0.8));
 }
 
 function setExpression(name: string, value: number) {
@@ -645,11 +660,10 @@ function resolveBodyColliders(
   // 1. Head Sphere Collider (Stage 6: Soft head collision for wrist, attenuated by face-touch mode)
   const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
   if (headNode) {
-    const headPos = new THREE.Vector3();
-    headNode.getWorldPosition(headPos);
-    headPos.y += 0.02; // Center on skull
-    const vHead = new THREE.Vector3().subVectors(out, headPos);
-    const distSq = vHead.lengthSq();
+    headNode.getWorldPosition(_colHeadPos);
+    _colHeadPos.y += 0.02; // Center on skull
+    _colVHead.subVectors(out, _colHeadPos);
+    const distSq = _colVHead.lengthSq();
 
     if (isWristOrHand) {
       // Radius ~0.07m for wrist, minimal clearance 0.005m, attenuated while face-touch mode is active
@@ -657,15 +671,15 @@ function resolveBodyColliders(
       const wristHeadRadius = 0.07 + 0.005;
       if (collisionFactor > 0.01 && distSq < wristHeadRadius * wristHeadRadius && distSq > 1e-6) {
         const dist = Math.sqrt(distSq);
-        const pushedPos = headPos.clone().addScaledVector(vHead.multiplyScalar(1 / dist), wristHeadRadius);
-        out.lerp(pushedPos, collisionFactor);
+        _scratchV1.copy(_colHeadPos).addScaledVector(_colVHead.multiplyScalar(1 / dist), wristHeadRadius);
+        out.lerp(_scratchV1, collisionFactor);
       }
     } else {
       // Elbows collide fully with head sphere so they never clip into the head
       const elbowHeadRadius = 0.11 + minMargin;
       if (distSq < elbowHeadRadius * elbowHeadRadius && distSq > 1e-6) {
         const dist = Math.sqrt(distSq);
-        out.copy(headPos).addScaledVector(vHead.multiplyScalar(1 / dist), elbowHeadRadius);
+        out.copy(_colHeadPos).addScaledVector(_colVHead.multiplyScalar(1 / dist), elbowHeadRadius);
       }
     }
   }
@@ -674,36 +688,34 @@ function resolveBodyColliders(
   const chestNode = currentVrm.humanoid.getNormalizedBoneNode('chest');
   const hipsNode = currentVrm.humanoid.getNormalizedBoneNode('hips');
   if (chestNode && hipsNode) {
-    const chestPos = new THREE.Vector3();
-    chestNode.getWorldPosition(chestPos);
-    chestPos.y += 0.03;
+    chestNode.getWorldPosition(_colChestPos);
+    _colChestPos.y += 0.03;
 
-    const hipsPos = new THREE.Vector3();
-    hipsNode.getWorldPosition(hipsPos);
-    hipsPos.y -= 0.03;
+    hipsNode.getWorldPosition(_colHipsPos);
+    _colHipsPos.y -= 0.03;
 
-    const vAB = new THREE.Vector3().subVectors(hipsPos, chestPos);
-    const lenSq = vAB.lengthSq();
+    _colVAB.subVectors(_colHipsPos, _colChestPos);
+    const lenSq = _colVAB.lengthSq();
     if (lenSq > 1e-4) {
       const t = THREE.MathUtils.clamp(
-        new THREE.Vector3().subVectors(out, chestPos).dot(vAB) / lenSq,
+        _scratchV2.subVectors(out, _colChestPos).dot(_colVAB) / lenSq,
         0,
         1
       );
-      const center = new THREE.Vector3().copy(chestPos).addScaledVector(vAB, t);
+      _colCenter.copy(_colChestPos).addScaledVector(_colVAB, t);
 
       // Anatomical width (rx) and depth (rz) of the avatar at height t
       const rx = THREE.MathUtils.lerp(0.145, 0.165, t) + minMargin;
       const rz = THREE.MathUtils.lerp(0.115, 0.135, t) + minMargin;
 
-      const dx = out.x - center.x;
-      const dz = out.z - center.z;
+      const dx = out.x - _colCenter.x;
+      const dz = out.z - _colCenter.z;
 
       const normDistSq = (dx * dx) / (rx * rx) + (dz * dz) / (rz * rz);
       if (normDistSq < 1.0 && normDistSq > 1e-6) {
         const scale = 1.0 / Math.sqrt(normDistSq);
-        out.x = center.x + dx * scale;
-        out.z = center.z + dz * scale;
+        out.x = _colCenter.x + dx * scale;
+        out.z = _colCenter.z + dz * scale;
       }
     }
   }
@@ -1174,7 +1186,7 @@ function solveArmVectorIK(
       { name: 'Ring', joints: [13, 14, 15, 16], isThumb: false },
       { name: 'Little', joints: [17, 18, 19, 20], isThumb: false },
     ];
-    const bendAxis = new THREE.Vector3(0, 0, isLeft ? -1 : 1);
+    const bendAxis = isLeft ? BEND_AXIS_Z_NEG : BEND_AXIS_Z_POS;
     for (const f of fingerDefs) {
       const [j0, j1, j2, j3] = f.joints;
       const p0 = handLM[j0];
@@ -1191,14 +1203,16 @@ function solveArmVectorIK(
       const a3 = curl * (f.isThumb ? 0.7 : 1.15);
       const prefix = isLeft ? 'left' : 'right';
       const b1Name = (prefix + f.name + (f.isThumb ? 'Metacarpal' : 'Proximal')) as VRMHumanBoneName;
-      const b2Name = (prefix + f.name + 'Intermediate') as VRMHumanBoneName;
+      const b2Name = (prefix + f.name + (f.isThumb ? 'Proximal' : 'Intermediate')) as VRMHumanBoneName;
       const b3Name = (prefix + f.name + 'Distal') as VRMHumanBoneName;
+
       const b1 = currentVrm.humanoid.getNormalizedBoneNode(b1Name);
       const b2 = currentVrm.humanoid.getNormalizedBoneNode(b2Name);
       const b3 = currentVrm.humanoid.getNormalizedBoneNode(b3Name);
-      if (b1) b1.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(bendAxis, a1), 0.5);
-      if (b2) b2.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(bendAxis, a2), 0.5);
-      if (b3) b3.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(bendAxis, a3), 0.5);
+
+      if (b1) { _scratchQ1.setFromAxisAngle(bendAxis, a1); b1.quaternion.slerp(_scratchQ1, 0.5); }
+      if (b2) { _scratchQ1.setFromAxisAngle(bendAxis, a2); b2.quaternion.slerp(_scratchQ1, 0.5); }
+      if (b3) { _scratchQ1.setFromAxisAngle(bendAxis, a3); b3.quaternion.slerp(_scratchQ1, 0.5); }
     }
   } else {
     relaxFingers(targetSide);
@@ -1667,17 +1681,15 @@ function onHolisticResults(results: any) {
       torsoPitch = THREE.MathUtils.clamp(torsoPitch, -0.25, 0.25);
 
       // Distribute: 35% Spine, 65% Chest
-      const qSpineTarget = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(torsoPitch * 0.35, torsoYaw * 0.35, torsoRoll * 0.35, 'YXZ')
-      );
-      const qChestTarget = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(torsoPitch * 0.65, torsoYaw * 0.65, torsoRoll * 0.65, 'YXZ')
-      );
-
+      _scratchE1.set(torsoPitch * 0.35, torsoYaw * 0.35, torsoRoll * 0.35, 'YXZ');
+      _scratchQ1.setFromEuler(_scratchE1);
       const spineBone = currentVrm.humanoid?.getNormalizedBoneNode('spine');
+      if (spineBone) spineBone.quaternion.slerp(_scratchQ1, 0.2);
+
+      _scratchE1.set(torsoPitch * 0.65, torsoYaw * 0.65, torsoRoll * 0.65, 'YXZ');
+      _scratchQ2.setFromEuler(_scratchE1);
       const chestBone = currentVrm.humanoid?.getNormalizedBoneNode('chest');
-      if (spineBone) spineBone.quaternion.slerp(qSpineTarget, 0.2);
-      if (chestBone) chestBone.quaternion.slerp(qChestTarget, 0.2);
+      if (chestBone) chestBone.quaternion.slerp(_scratchQ2, 0.2);
 
       // Hips Horizontal Sway
       const rawSway = (settings.mirror ? -(sMidX - 0.5) : sMidX - 0.5) * 0.25 * tSens;
