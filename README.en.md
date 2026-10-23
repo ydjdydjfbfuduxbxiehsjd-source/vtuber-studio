@@ -8,27 +8,32 @@
   <img src="screenshots/screenshot_01.png" alt="VTuber Studio Pro Interface" width="760">
 </p>
 
-A standalone browser-based 3D virtual avatar VTuber studio with high-precision AI face tracking, Apple ARKit 52 Perfect Sync expressions, full hand & finger IK, and torso tracking using a regular webcam!
+A standalone browser-based 3D virtual avatar (VTuber) studio with high-precision AI facial tracking (Apple ARKit 52 Perfect Sync), two-bone anatomical arm IK, finger tracking, and torso movement using a standard webcam!
 
 ---
 
-## 🚀 Quick Start (For Users)
+## 🌟 How Does VTuber Studio Pro Compare to VSeeFace and Warudo?
 
-1. Go to the **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** page and download **`VTuber_Studio_Pro.zip`**.
+| Feature | VTuber Studio Pro | VSeeFace / Warudo |
+| :--- | :--- | :--- |
+| **Installation** | **None** — runs directly in the browser or via a lightweight portable launcher | Requires heavy multi-gigabyte software installation (1.5GB to 5GB+) |
+| **Platform** | **Cross-Platform** on any modern browser (Windows, macOS, Linux) | Primarily Windows desktop |
+| **OBS Studio** | **Native Browser Source** (`http://localhost:5173/?obs=true`) with transparent canvas | Window Capture / Game Capture or virtual camera |
+| **Privacy** | **100% Local** — runs on client GPU/CPU via WebAssembly & WebGL. No video ever leaves your device | Depends on software & connected plugins |
+| **Cost** | **100% Free & Open Source (MIT)** | Free with limitations or paid DLC / subscription tiers |
+
+---
+
+## 🚀 Quick Start
+
+### For Streamers & End-Users (1-Click, No Node.js)
+1. Go to **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** and download `VTuber_Studio_Pro.zip`.
 2. Extract the archive to any folder.
-3. Launch **`start.bat`** (or `run.bat`).
-4. Your browser will automatically open **`http://localhost:5173/`**.
+3. Launch **`start.bat`** (Windows uses built-in PowerShell HTTP server; no software installation needed).
+4. Browser automatically opens at `http://localhost:5173/`.
 
-> [!NOTE]
-> **No Node.js or Python required for running prebuilt releases!**  
-> All neural network weights (MediaPipe Holistic, Three.js, VRM Loader) and avatars are bundled inside the portable archive. It runs 100% offline using the built-in Windows PowerShell HTTP server (`server.ps1`).
-
----
-
-## 💻 Developer Setup (Build from Source)
-
-To clone and build from source code, you need **[Node.js](https://nodejs.org/) (v18+)** and **npm** installed.
-
+### For Developers (Build from Source)
+Requires **[Node.js](https://nodejs.org/) (v18+)** and **npm**:
 ```bash
 # 1. Clone repository
 git clone https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio.git
@@ -49,33 +54,54 @@ npm run preview
 
 ---
 
-## 🎀 Avatar Models
+## 🎀 Loading Custom VRM Avatars
 
-* **Standard VRM** — baseline VRM avatar for testing tracking and standard blendshapes.
-* **Gyaru (ARKit 52 ✨)** — avatar with full 52 Apple ARKit blendshapes.
-* **Custom Avatar** — simply drag & drop any `.vrm` file directly into your browser window or place it in `public/models/`.
+1. **Drag & Drop**: Drag any `.vrm` file from your desktop/file manager directly into the browser window.
+2. **Sidebar Upload**: Click on the upload zone in the left panel.
+3. **Local Assets**: Place `.vrm` files into `public/models/`.
 
----
-
-## ⚖️ Model & Code Licenses
-
-* **Application Code**: Licensed under the open-source **MIT License** (see [LICENSE](LICENSE)). Free for personal, educational, and commercial streaming use.
-* **3D Avatar Models (`.vrm`)**:
-  > [!IMPORTANT]
-  > The MIT License applies **strictly to the source code** of this software.  
-  > 3D avatar models carry their own copyright and license terms:
-  > * `sample.vrm` is an official sample model by pixiv Inc. released under the [VRM 1.0 License](https://vrm.dev/licenses/1.0/) (allows free use, modification, and redistribution).
-  > * Third-party avatars belong to their respective creators (VRoid Hub, Booth, etc.). Please verify the model creator's terms before using avatars in public broadcasts.
+Supports both **VRM 0.x** and **VRM 1.0** specifications (VRoid Studio, Booth, Blender exports).
 
 ---
 
-## ⚡ Key Features
+## 🎯 Arm Calibration & Reach Multiplier
 
-* **Facial Tracking (Apple ARKit 52)**: 468/478 FaceMesh points with Perfect Sync blendshapes (individual eye blinks, wide eyes, squints, brow raises/furrows, asymmetrical smiles, cheek puff, mouth pucker/funnel, gaze tracking).
-* **Hand & Finger IK**: Full 21-joint skeletal hand tracking, anatomical elbow IK, face-touch snapping, body collision avoidance, and graceful idle A-pose transitions.
-* **Torso & Posture Tracking**: Shoulder roll, body yaw/pitch, and natural sway.
-* **Audio Lip-Sync**: Real-time microphone audio amplitude analysis blended with webcam mouth movements.
-* **OBS Studio Integration**: Transparent background, Chroma Key (Green / Blue / Magenta), hotkeys, and full-screen support.
+1. Start webcam tracking via **"Start Camera"**.
+2. Stand centered in front of your camera so your shoulders and arms are clearly visible.
+3. Click **"Калибровка (T-поза)"** at the bottom of the sidebar.
+4. Hold a T-pose during the 3-second countdown.
+5. The system measures your shoulder width and arm span, sets your scale, and saves it in `localStorage`.
+6. Adjust the **"Reach Multiplier"** slider (default: `1.15x`) to fine-tune how far the avatar arms reach.
+
+---
+
+## 🎥 OBS Studio Integration (Browser Source)
+
+1. Turn on the **"Режим OBS (Прозрачный фон)"** toggle in the sidebar or press **`H`** to hide all UI elements.
+2. In OBS Studio, add a new **Browser Source**:
+   * **URL**: `http://localhost:5173/?obs=true`
+   * **Width**: `1920`
+   * **Height**: `1080`
+   * Check **"Shutdown source when not visible"**.
+3. The `?obs=true` parameter automatically enables transparent canvas rendering with all overlays hidden.
+
+---
+
+## ⚠️ Known Limitations (Honest Breakdown)
+
+* **Monocular Webcam Depth**: Single webcam vision cannot measure true optical depth; Z-coordinates are heuristic and dampened (`0.4x`) to avoid jitter.
+* **Frame Edges**: If a shoulder or elbow exits the camera frame, direction caching holds the pose before gently transitioning back to idle A-pose.
+* **Lighting**: Good, even frontal facial lighting is required for accurate 52-blendshape ARKit tracking.
+* **Hand Over Face**: If both hands completely cover the face, facial tracking will pause until the face is visible again.
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] **VMC (Virtual Motion Capture)** protocol streaming over WebSocket/UDP for Unity, Unreal Engine, and Blender.
+- [ ] Animation recording and export to **BVH** and **glTF/GLB** formats.
+- [ ] Customizable 3D environments (virtual rooms, dynamic studio lighting).
+- [ ] Stream interactive gesture triggers (sound effects, props).
 
 ---
 
@@ -83,14 +109,16 @@ npm run preview
 
 | Key | Action |
 | :--- | :--- |
-| **H** | Hide / Show side control panel (for clean OBS screen capture) |
-| **Space** | Reset avatar pose & center 3D camera |
+| **H** | Hide / Show UI panels (for OBS capture) |
+| **D** | Toggle **Debug HUD** overlay and 3D IK wrist targets |
+| **Space** | Center camera & reset avatar to resting pose |
 | **LMB + Drag** | Orbit camera around avatar |
 | **RMB + Drag** | Pan scene camera |
 | **Mouse Wheel** | Zoom in / out |
 
 ---
 
-## 📄 License
+## ⚖️ Licenses
 
-MIT License (see [LICENSE](LICENSE)).
+* **Software Code**: [MIT License](LICENSE).
+* **3D Models**: Sample model `sample.vrm` provided by pixiv Inc. under [VRM 1.0 License](https://vrm.dev/licenses/1.0/). User models remain under their respective creators' copyright.

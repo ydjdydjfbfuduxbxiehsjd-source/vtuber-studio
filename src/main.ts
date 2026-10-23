@@ -2272,6 +2272,38 @@ document.getElementById('btn-toggle-debug')?.addEventListener('click', () => {
   toggleDebugMode();
 });
 
+
+/* ==========================================================================
+   OBS BROWSER SOURCE & TRANSPARENT MODE (STAGE 10)
+   ========================================================================== */
+export function setOBSTransparentMode(enabled: boolean) {
+  if (enabled) {
+    scene.background = null;
+    renderer.setClearColor(0x000000, 0);
+    // Hide UI
+    const tb = document.getElementById('top-bar'); if (tb && !tb.classList.contains('hidden')) toggleUIVisibility();
+    showEmotionToast('🎥', 'OBS Режим', 'Прозрачный фон включен. Нажмите H для показа UI');
+  } else {
+    scene.background = new THREE.Color(settings.bgColor);
+    renderer.setClearColor(new THREE.Color(settings.bgColor), 1);
+  }
+}
+
+const toggleObs = document.getElementById('toggle-obs-mode') as HTMLInputElement | null;
+if (toggleObs) {
+  toggleObs.addEventListener('change', (e) => {
+    setOBSTransparentMode((e.target as HTMLInputElement).checked);
+  });
+}
+
+// Auto-enable OBS mode if URL contains ?obs=true or #obs
+if (window.location.search.includes('obs=true') || window.location.hash.includes('obs')) {
+  window.addEventListener('DOMContentLoaded', () => {
+    if (toggleObs) toggleObs.checked = true;
+    setOBSTransparentMode(true);
+  });
+}
+
 // Recalibrate / Reset Center
 const recalibrateBtn = document.getElementById('btn-recalibrate')!;
 recalibrateBtn.addEventListener('click', () => {
