@@ -273,6 +273,60 @@ if (btnLoadSample) {
   });
 }
 
+
+/* ==========================================================================
+   AVATAR REAL SKELETON ARM LENGTHS (STAGE 1)
+   ========================================================================== */
+export interface ArmLengths {
+  L1: number;
+  L2: number;
+  total: number;
+}
+
+export const avatarArmLengths: { left: ArmLengths; right: ArmLengths } = {
+  left: { L1: 0.225, L2: 0.218, total: 0.443 },
+  right: { L1: 0.225, L2: 0.218, total: 0.443 },
+};
+
+export function computeAvatarArmLengths() {
+  if (!currentVrm || !currentVrm.humanoid) return;
+
+  currentVrm.scene.updateMatrixWorld(true);
+
+  const sides: ('left' | 'right')[] = ['left', 'right'];
+  for (const side of sides) {
+    const upper = currentVrm.humanoid.getNormalizedBoneNode((side + 'UpperArm') as VRMHumanBoneName);
+    const lower = currentVrm.humanoid.getNormalizedBoneNode((side + 'LowerArm') as VRMHumanBoneName);
+    const hand = currentVrm.humanoid.getNormalizedBoneNode((side + 'Hand') as VRMHumanBoneName);
+
+    if (upper && lower && hand) {
+      const pUpper = new THREE.Vector3();
+      const pLower = new THREE.Vector3();
+      const pHand = new THREE.Vector3();
+
+      upper.getWorldPosition(pUpper);
+      lower.getWorldPosition(pLower);
+      hand.getWorldPosition(pHand);
+
+      const dUpperToLower = pUpper.distanceTo(pLower);
+      const dLowerToHand = pLower.distanceTo(pHand);
+
+      const L1 = (Number.isFinite(dUpperToLower) && dUpperToLower > 0.05 && dUpperToLower < 1.0) ? dUpperToLower : 0.225;
+      const L2 = (Number.isFinite(dLowerToHand) && dLowerToHand > 0.05 && dLowerToHand < 1.0) ? dLowerToHand : 0.218;
+
+      avatarArmLengths[side] = {
+        L1,
+        L2,
+        total: L1 + L2,
+      };
+    }
+  }
+
+  console.log(
+    "[Skeleton Arm Lengths] Left: L1=" + avatarArmLengths.left.L1.toFixed(3) + "m, L2=" + avatarArmLengths.left.L2.toFixed(3) + "m (Total: " + avatarArmLengths.left.total.toFixed(3) + "m) | Right: L1=" + avatarArmLengths.right.L1.toFixed(3) + "m, L2=" + avatarArmLengths.right.L2.toFixed(3) + "m (Total: " + avatarArmLengths.right.total.toFixed(3) + "m)"
+  );
+}
+
 function loadVRM(url: string, name = 'Sample Model') {
   modelStatusText.textContent = `Модель: Загрузка (${name})...`;
 
@@ -294,6 +348,7 @@ function loadVRM(url: string, name = 'Sample Model') {
       scene.add(vrm.scene);
       updateModelCapabilities();
       applyRestingPose();
+      computeAvatarArmLengths();
 
       modelStatusText.textContent = `Модель: ${name} ${isArkitModel ? '(ARKit 52 ✨)' : ''}`;
       console.log('Loaded VRM successfully:', vrm);
@@ -739,20 +794,11 @@ function solveArmVectorIK(
   const shoulderPos = new THREE.Vector3();
   upperBone.getWorldPosition(shoulderPos);
 
-  // 1. Arm segment lengths (dynamically computed from active avatar skeleton)
-  let L1_avatar = 0.225;
-  let L2_avatar = 0.218;
-  const pUpper = new THREE.Vector3();
-  const pLower = new THREE.Vector3();
-  const pHand = new THREE.Vector3();
-  upperBone.getWorldPosition(pUpper);
-  lowerBone.getWorldPosition(pLower);
-  handBone.getWorldPosition(pHand);
-  const dUpperToLower = pUpper.distanceTo(pLower);
-  const dLowerToHand = pLower.distanceTo(pHand);
-  if (dUpperToLower > 0.1 && dUpperToLower < 0.6) L1_avatar = dUpperToLower;
-  if (dLowerToHand > 0.1 && dLowerToHand < 0.6) L2_avatar = dLowerToHand;
-  const L_avatar = L1_avatar + L2_avatar;
+  // 1. Arm segment lengths from real VRM skeleton (computed on model load)
+  const armLen = avatarArmLengths[targetSide];
+  const L1_avatar = armLen.L1;
+  const L2_avatar = armLen.L2;
+  const L_avatar = armLen.total;
 
   // 2. Position-based Target Wrist from Shoulder with Dampened Z (0.35x)
   // X and Y drive the primary screen position; Z foreshortening is dampened to prevent distortion
