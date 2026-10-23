@@ -1,4 +1,4 @@
-# VTuber Studio Pro - Built-in Windows Native Server
+﻿# VTuber Studio Pro - Built-in Windows Native Server
 # Runs out-of-the-box on ANY Windows machine without Node.js or Python!
 
 $distDir = Join-Path $PSScriptRoot "dist"
@@ -15,6 +15,7 @@ while ($port -lt 5200) {
     try {
         $listener = New-Object System.Net.HttpListener
         $listener.Prefixes.Add("http://127.0.0.1:$port/")
+        try { $listener.Prefixes.Add("http://localhost:$port/") } catch {}
         $listener.Start()
         break
     } catch {

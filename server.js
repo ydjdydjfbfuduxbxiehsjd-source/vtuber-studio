@@ -32,9 +32,16 @@ const MIME_TYPES = {
   '.binarypb': 'application/octet-stream',
 };
 
-if (!fs.existsSync(DIST_DIR)) {
-  console.error('[ERROR] dist folder not found! Please build the project: npm run build');
-  process.exit(1);
+const indexPath = path.join(DIST_DIR, 'index.html');
+if (!fs.existsSync(DIST_DIR) || !fs.existsSync(indexPath)) {
+  console.log('[INFO] dist folder missing or incomplete. Building project with npm run build...');
+  try {
+    const { execSync } = await import('node:child_process');
+    execSync('npm run build', { cwd: __dirname, stdio: 'inherit' });
+  } catch (err) {
+    console.error('[ERROR] Automatic build failed! Please run npm run build manually.');
+    process.exit(1);
+  }
 }
 
 function handleRequest(req, res) {
@@ -138,7 +145,7 @@ function startServer(port) {
     exec(startCmd);
   });
 
-  server.listen(port, '0.0.0.0');
+  server.listen(port);
 }
 
 startServer(currentPort);

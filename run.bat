@@ -1,7 +1,7 @@
-@echo off
+﻿@echo off
 setlocal
 chcp 65001 > nul
-title VTuber Studio Pro - Portable Launcher
+title VTuber Studio Pro - Launcher
 
 echo ============================================================
 echo   VTuber Studio Pro (Web Edition)
@@ -10,32 +10,34 @@ echo.
 
 cd /d "%~dp0"
 
-REM 1. Check if prebuilt dist exists
-if exist "dist\index.html" goto check_node
-
-echo [INFO] Prebuilt dist folder not found.
+REM 1. Check if Node.js is installed
 where node >nul 2>nul
-if errorlevel 1 goto no_node_no_dist
+if errorlevel 1 goto no_node
 
-if not exist "node_modules" (
-    echo [INFO] Installing dependencies...
-    call npm install
-)
+REM 2. Check dependencies
+if not exist "node_modules\" goto do_install
+goto check_dist
 
+:do_install
+echo [INFO] Installing dependencies...
+call npm install
+if errorlevel 1 goto fail_install
+
+:check_dist
+if not exist "dist\index.html" goto do_build
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if ((Get-Item 'src\main.ts').LastWriteTime -gt (Get-Item 'dist\index.html').LastWriteTime -or (Get-Item 'index.html').LastWriteTime -gt (Get-Item 'dist\index.html').LastWriteTime) { exit 1 } else { exit 0 }" >nul 2>nul
+if errorlevel 1 goto do_build
+
+goto run_server
+
+:do_build
 echo [INFO] Building application...
 call npm run build
-if errorlevel 1 (
-    echo [ERROR] Build failed.
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto fail_build
 
-:check_node
-where node >nul 2>nul
-if errorlevel 1 goto run_powershell
-
-:run_node
-echo [OK] Launching portable Node.js server...
+:run_server
+echo [OK] Starting VTuber Studio server...
 if exist "server.cjs" (
     node server.cjs
 ) else (
@@ -43,16 +45,26 @@ if exist "server.cjs" (
 )
 goto finish
 
-:run_powershell
-echo [OK] Launching built-in Windows HTTP server...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0server.ps1"
-goto finish
-
-:no_node_no_dist
-echo [ERROR] Prebuilt dist folder is missing and Node.js is not installed.
-echo Please install Node.js from https://nodejs.org/ or download the release ZIP.
+:fail_install
+echo [ERROR] npm install failed.
 pause
 exit /b 1
+
+:fail_build
+echo [ERROR] Build failed. Please check errors above.
+pause
+exit /b 1
+
+:no_node
+if not exist "dist\index.html" (
+    echo [ERROR] Node.js is not installed and prebuilt dist is missing.
+    echo Please install Node.js from https://nodejs.org/
+    pause
+    exit /b 1
+)
+echo [OK] Node.js not found in PATH. Launching Windows native HTTP server...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0server.ps1"
+goto finish
 
 :finish
 if errorlevel 1 (
