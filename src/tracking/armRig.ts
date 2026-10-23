@@ -37,15 +37,15 @@ export interface ArmDebugInfo {
 }
 
 /* ==========================================================================
-   COORDINATE CONVERSION (STAGE 1)
+   COORDINATE CONVERSION (STAGE 1 & 7)
    Converts MediaPipe World Landmarks (meters, origin at hips) to Avatar space.
    ========================================================================== */
 
 /**
  * Converts a MediaPipe World Landmark to Three.js avatar coordinates.
- * - MediaPipe: origin at hips, +Y down, +X subject-left, -Z forward (away/depth).
- * - Avatar: +Y up, +X avatar-left, +Z forward (towards camera).
- * - When mirror is true (standard selfie webcam): user right arm maps to avatar right arm.
+ * - MediaPipe: origin at hips, +Y down, +X subject-left (-X subject-right), -Z towards camera.
+ * - Three.js VRM: +Y up, +X avatar-left (-X avatar-right), +Z forward towards camera.
+ * - In mirror mode (selfie camera): user right arm maps to avatar right arm (-X).
  */
 export function convertPoseWorldLandmark(
   raw: Landmark3D,
@@ -91,15 +91,12 @@ export function computeFingerAngles(
   p2: Landmark3D,
   p3: Landmark3D
 ): FingerAngles {
-  // Vector MCP -> PIP
   const v1x = p1.x - p0.x, v1y = p1.y - p0.y, v1z = p1.z - p0.z;
   const len1 = Math.hypot(v1x, v1y, v1z);
 
-  // Vector PIP -> DIP
   const v2x = p2.x - p1.x, v2y = p2.y - p1.y, v2z = p2.z - p1.z;
   const len2 = Math.hypot(v2x, v2y, v2z);
 
-  // Vector DIP -> Tip
   const v3x = p3.x - p2.x, v3y = p3.y - p2.y, v3z = p3.z - p2.z;
   const len3 = Math.hypot(v3x, v3y, v3z);
 
@@ -117,13 +114,8 @@ export function computeFingerAngles(
     distalBend = Math.acos(clampedDot);
   }
 
-  // Proximal bend is proportional to intermediate bend with anatomical coupling
   const proximalBend = Math.min(Math.PI / 2, intermediateBend * 0.85);
 
-  // Clamps:
-  // Proximal: 0 to 90 deg (1.57 rad)
-  // Intermediate: 0 to 110 deg (1.92 rad)
-  // Distal: 0 to 80 deg (1.40 rad)
   return {
     proximalBend: THREE.MathUtils.clamp(proximalBend, 0, Math.PI * 0.5),
     intermediateBend: THREE.MathUtils.clamp(intermediateBend, 0, 1.92),
@@ -175,14 +167,14 @@ export function computeThumbBends(
    ========================================================================== */
 
 export class ArmRig {
-  private side: 'left' | 'right';
-  private isLeft: boolean;
+  public side: 'left' | 'right';
+  public isLeft: boolean;
 
   // State Machine (Stage 5)
   public state: ArmTrackingState = 'REST';
-  private lossTimestamp = 0; // timestamp when tracking was lost
+  private lossTimestamp = 0;
   private lastFrameTimestamp = 0;
-  private transitionAlpha = 0.0; // 0 (idle) to 1 (active)
+  private transitionAlpha = 0.0;
 
   // 1€ Filters on input landmark positions (Stage 1: minCutoff 1.0, beta 0.03)
   private filterShoulder = new OneEuroFilter3D(1.0, 0.03, 1.0);
@@ -194,17 +186,17 @@ export class ArmRig {
   private lastGoodElbow = new THREE.Vector3();
   private lastGoodWrist = new THREE.Vector3();
 
-  // Model Rest Directions (computed once on model load)
-  private restUpperArmDir = new THREE.Vector3();
-  private restLowerArmDir = new THREE.Vector3();
+  // Model Rest Directions: in VRM 1.0 humanoid T-pose, Left is (+1, 0, 0), Right is (-1, 0, 0)
+  public restUpperArmDir = new THREE.Vector3();
+  public restLowerArmDir = new THREE.Vector3();
   private isRestComputed = false;
 
   // Cached Quaternions for smoothing
-  private currentUpperQ = new THREE.Quaternion();
-  private currentLowerQ = new THREE.Quaternion();
-  private currentHandQ = new THREE.Quaternion();
+  public currentUpperQ = new THREE.Quaternion();
+  public currentLowerQ = new THREE.Quaternion();
+  public currentHandQ = new THREE.Quaternion();
 
-  // Idle rest rotations
+  // Idle rest rotations (natural resting A-pose)
   private idleUpperEuler = new THREE.Euler();
   private idleLowerEuler = new THREE.Euler();
   private idleHandEuler = new THREE.Euler();
@@ -221,16 +213,22 @@ export class ArmRig {
   private _parentInvQ = new THREE.Quaternion();
   private _upperWorldQ = new THREE.Quaternion();
   private _upperInvQ = new THREE.Quaternion();
+  private _lowerWorldQ = new THREE.Quaternion();
+  private _lowerInvQ = new THREE.Quaternion();
   private _targetUpperQ = new THREE.Quaternion();
   private _targetLowerQ = new THREE.Quaternion();
   private _targetHandQ = new THREE.Quaternion();
   private _palmForward = new THREE.Vector3();
   private _palmSide = new THREE.Vector3();
   private _palmNormal = new THREE.Vector3();
+  private _colX = new THREE.Vector3();
+  private _colY = new THREE.Vector3();
+  private _colZ = new THREE.Vector3();
   private _palmRotMatrix = new THREE.Matrix4();
   private _scratchQ1 = new THREE.Quaternion();
   private _scratchQ2 = new THREE.Quaternion();
   private _scratchV1 = new THREE.Vector3();
+  private _avatarShoulderPos = new THREE.Vector3();
 
   // Debug data
   public debugInfo: ArmDebugInfo;
@@ -239,22 +237,23 @@ export class ArmRig {
     this.side = side;
     this.isLeft = side === 'left';
 
+    // In VRM 1.0 normalized humanoid space:
+    // Left arm extends along +X, Right arm extends along -X in rest T-pose
+    this.restUpperArmDir.set(this.isLeft ? 1 : -1, 0, 0);
+    this.restLowerArmDir.set(this.isLeft ? 1 : -1, 0, 0);
+
     // Idle A-pose rotations
     if (this.isLeft) {
       this.idleUpperEuler.set(0, 0, -1.25); // ~72 deg down
-      this.idleLowerEuler.set(0, 0, 0.25);
+      this.idleLowerEuler.set(0, 0, -0.25);
       this.idleHandEuler.set(0, 0, 0);
-      this.restUpperArmDir.set(1, 0, 0);
-      this.restLowerArmDir.set(1, 0, 0);
       this.lastGoodShoulder.set(0.18, 0.45, 0);
       this.lastGoodElbow.set(0.35, 0.15, 0);
       this.lastGoodWrist.set(0.38, -0.15, 0);
     } else {
       this.idleUpperEuler.set(0, 0, 1.25);
-      this.idleLowerEuler.set(0, 0, -0.25);
+      this.idleLowerEuler.set(0, 0, 0.25);
       this.idleHandEuler.set(0, 0, 0);
-      this.restUpperArmDir.set(-1, 0, 0);
-      this.restLowerArmDir.set(-1, 0, 0);
       this.lastGoodShoulder.set(-0.18, 0.45, 0);
       this.lastGoodElbow.set(-0.35, 0.15, 0);
       this.lastGoodWrist.set(-0.38, -0.15, 0);
@@ -277,40 +276,18 @@ export class ArmRig {
   }
 
   /**
-   * Computes bone rest directions directly from VRM normalized bones on model load.
+   * Initializes rest directions for the VRM model.
+   * Fixed to VRM normalized specification (+X left, -X right).
    */
   public initFromVRM(vrm: VRM) {
     if (!vrm.humanoid) return;
-    const upperName = (this.side + 'UpperArm') as VRMHumanBoneName;
-    const lowerName = (this.side + 'LowerArm') as VRMHumanBoneName;
-    const handName = (this.side + 'Hand') as VRMHumanBoneName;
-
-    const uNode = vrm.humanoid.getNormalizedBoneNode(upperName);
-    const lNode = vrm.humanoid.getNormalizedBoneNode(lowerName);
-    const hNode = vrm.humanoid.getNormalizedBoneNode(handName);
-
-    if (uNode && lNode) {
-      // In VRM normalized humanoid rest T-pose:
-      // Vector from upperArm to lowerArm
-      this.restUpperArmDir.copy(lNode.position).normalize();
-      if (!Number.isFinite(this.restUpperArmDir.x) || this.restUpperArmDir.lengthSq() < 1e-4) {
-        this.restUpperArmDir.set(this.isLeft ? 1 : -1, 0, 0);
-      }
-    }
-
-    if (lNode && hNode) {
-      // Vector from lowerArm to hand
-      this.restLowerArmDir.copy(hNode.position).normalize();
-      if (!Number.isFinite(this.restLowerArmDir.x) || this.restLowerArmDir.lengthSq() < 1e-4) {
-        this.restLowerArmDir.set(this.isLeft ? 1 : -1, 0, 0);
-      }
-    }
-
+    this.restUpperArmDir.set(this.isLeft ? 1 : -1, 0, 0);
+    this.restLowerArmDir.set(this.isLeft ? 1 : -1, 0, 0);
     this.isRestComputed = true;
   }
 
   /**
-   * Main Frame Update
+   * Main Frame Update (FK & Hand Rig)
    */
   public update(
     vrm: VRM,
@@ -318,7 +295,7 @@ export class ArmRig {
     rawElbow: Landmark3D | null | undefined,
     rawWrist: Landmark3D | null | undefined,
     handLandmarks: Landmark3D[] | null | undefined,
-    poseFingers: Landmark3D[] | null | undefined,
+    _poseFingers: Landmark3D[] | null | undefined,
     mirror: boolean,
     now: number,
     handSens: number = 1.0
@@ -351,7 +328,6 @@ export class ArmRig {
     if (isDetectionValid) {
       this.state = 'ACTIVE';
       this.lossTimestamp = 0;
-      // Smooth fade-in from rest to active (~150 ms)
       this.transitionAlpha = Math.min(1.0, this.transitionAlpha + dt / 0.15);
     } else {
       if (!this.lossTimestamp) {
@@ -389,10 +365,6 @@ export class ArmRig {
     this._eWorld.copy(this.lastGoodElbow);
     this._wWorld.copy(this.lastGoodWrist);
 
-    this.debugInfo.trackedShoulder.copy(this._sWorld);
-    this.debugInfo.trackedElbow.copy(this._eWorld);
-    this.debugInfo.trackedWrist.copy(this._wWorld);
-
     // If completely in REST state, smoothly return to idle A-pose and exit
     if (this.state === 'REST' && this.transitionAlpha <= 0.001) {
       this.applyIdlePose(vrm, 0.1);
@@ -400,7 +372,7 @@ export class ArmRig {
     }
 
     // =========================================================================
-    // STAGE 2: UPPER ARM & LOWER ARM FK (BY DIRECTION VECTORS)
+    // STAGE 2: UPPER ARM & LOWER ARM FK (DIRECTION VECTORS)
     // =========================================================================
 
     const upperName = (this.side + 'UpperArm') as VRMHumanBoneName;
@@ -428,14 +400,13 @@ export class ArmRig {
       this._dirLowerWorld.normalize();
     }
 
-    // Anatomical Elbow Hinge Limit (0 to 150 degrees)
-    // Angle between upper arm and lower arm directions
+    // Anatomical Elbow Hinge Angle (0 to 180 degrees)
+    // Dot product between upper arm direction and lower arm direction
     const dotArm = THREE.MathUtils.clamp(this._dirUpperWorld.dot(this._dirLowerWorld), -1, 1);
     const rawElbowAngle = Math.acos(dotArm);
     this.debugInfo.elbowAngleDeg = THREE.MathUtils.radToDeg(rawElbowAngle);
 
-    // Soft Torso Collision Repulsion for Elbow (Stage 6)
-    // Prevent elbow from going inside the avatar's chest/spine cylinder
+    // Soft Torso Repulsion for Elbow
     const chestNode = vrm.humanoid.getNormalizedBoneNode('chest') || vrm.humanoid.getNormalizedBoneNode('spine');
     if (chestNode) {
       chestNode.getWorldPosition(this._scratchV1);
@@ -452,37 +423,63 @@ export class ArmRig {
     }
 
     // 2. Upper Arm Local Rotation
-    // Convert target direction to parent's local space
+    // Step 2a: Update parent node world matrix to get parent's updated orientation in this frame
     const parentNode = uNode.parent;
     if (parentNode) {
+      parentNode.updateWorldMatrix(true, false);
       parentNode.getWorldQuaternion(this._parentWorldQ);
       this._parentInvQ.copy(this._parentWorldQ).invert();
       this._dirUpperLocal.copy(this._dirUpperWorld).applyQuaternion(this._parentInvQ).normalize();
     } else {
+      this._parentWorldQ.identity();
+      this._parentInvQ.identity();
       this._dirUpperLocal.copy(this._dirUpperWorld);
     }
 
     this._targetUpperQ.setFromUnitVectors(this.restUpperArmDir, this._dirUpperLocal);
-
-    // Anatomical soft clamp on shoulder: prevent upper arm pitching behind back (> 75 deg backward)
-    // Safe check finite
     if (!Number.isFinite(this._targetUpperQ.x)) {
       this._targetUpperQ.identity();
     }
 
-    // 3. Lower Arm Local Rotation
-    // Convert lower arm direction to upperArm's current world orientation
+    // Blend Upper Arm with Idle A-pose
+    this._scratchQ1.setFromEuler(this.idleUpperEuler);
+    this._targetUpperQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
+    const smoothFactor = THREE.MathUtils.lerp(0.3, 0.7, Math.min(1.0, handSens));
+    this.currentUpperQ.slerp(this._targetUpperQ, smoothFactor);
+    uNode.quaternion.copy(this.currentUpperQ);
+
+    // Step 2b: Update uNode world matrix immediately so lNode can compute orientation in updated frame!
+    uNode.updateWorldMatrix(true, false);
     uNode.getWorldQuaternion(this._upperWorldQ);
     this._upperInvQ.copy(this._upperWorldQ).invert();
-    this._dirLowerLocal.copy(this._dirLowerWorld).applyQuaternion(this._upperInvQ).normalize();
 
+    // 3. Lower Arm Local Rotation
+    // Convert lower arm target direction to upper arm's updated orientation
+    this._dirLowerLocal.copy(this._dirLowerWorld).applyQuaternion(this._upperInvQ).normalize();
     this._targetLowerQ.setFromUnitVectors(this.restLowerArmDir, this._dirLowerLocal);
     if (!Number.isFinite(this._targetLowerQ.x)) {
       this._targetLowerQ.identity();
     }
 
+    // Blend Lower Arm with Idle A-pose
+    this._scratchQ1.setFromEuler(this.idleLowerEuler);
+    this._targetLowerQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
+    this.currentLowerQ.slerp(this._targetLowerQ, smoothFactor);
+    lNode.quaternion.copy(this.currentLowerQ);
+
+    // Update lNode world matrix immediately for hand calculations
+    lNode.updateWorldMatrix(true, false);
+    lNode.getWorldQuaternion(this._lowerWorldQ);
+    this._lowerInvQ.copy(this._lowerWorldQ).invert();
+
+    // Populate debug points directly aligned over avatar shoulder
+    uNode.getWorldPosition(this._avatarShoulderPos);
+    this.debugInfo.trackedShoulder.copy(this._avatarShoulderPos);
+    this.debugInfo.trackedElbow.copy(this._avatarShoulderPos).addScaledVector(this._dirUpperWorld, 0.24);
+    this.debugInfo.trackedWrist.copy(this.debugInfo.trackedElbow).addScaledVector(this._dirLowerWorld, 0.22);
+
     // =========================================================================
-    // STAGE 3: HAND ORIENTATION & 50% TWIST DISTRIBUTION
+    // STAGE 3: HAND ORIENTATION & 50% FOREARM TWIST
     // =========================================================================
 
     let hasHandOrientation = false;
@@ -493,17 +490,18 @@ export class ArmRig {
       const p17 = handLandmarks[17]; // Pinky MCP
 
       if (p0 && p5 && p17) {
-        // Forward vector = from 0 to midpoint(5, 17)
-        const mid5_17_x = (p5.x + p17.x) * 0.5;
-        const mid5_17_y = (p5.y + p17.y) * 0.5;
-        const mid5_17_z = (p5.z + p17.z) * 0.5;
+        // Forward vector = from wrist to finger bases midpoint
+        const midX = (p5.x + p17.x) * 0.5 - p0.x;
+        const midY = (p5.y + p17.y) * 0.5 - p0.y;
+        const midZ = (p5.z + p17.z) * 0.5 - p0.z;
 
-        const fX = mirror ? (mid5_17_x - p0.x) : -(mid5_17_x - p0.x);
-        const fY = -(mid5_17_y - p0.y);
-        const fZ = -(mid5_17_z - p0.z);
+        // Convert hand landmark delta to avatar world space
+        const fX = mirror ? midX : -midX;
+        const fY = -midY;
+        const fZ = -midZ;
         this._palmForward.set(fX, fY, fZ);
 
-        // Side vector: from 5 to 17 (or 17 to 5)
+        // Side vector: from index to pinky
         const sX = mirror ? (p17.x - p5.x) : -(p17.x - p5.x);
         const sY = -(p17.y - p5.y);
         const sZ = -(p17.z - p5.z);
@@ -513,24 +511,28 @@ export class ArmRig {
           this._palmForward.normalize();
           this._palmSide.normalize();
 
-          // Normal = cross(forward, side)
+          // Palm normal = cross(forward, side)
           this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
-          // Orthonormalize side
           this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
 
-          // Build orthonormal rotation matrix
-          this._palmRotMatrix.makeBasis(
-            this.isLeft ? this._palmSide : this._scratchV1.copy(this._palmSide).negate(),
-            this._palmNormal,
-            this._palmForward
-          );
+          // In VRM 1.0 normalized humanoid rest T-pose:
+          // Left hand: fingers point +X, palm normal is -Y
+          // Right hand: fingers point -X, palm normal is -Y
+          if (this.isLeft) {
+            this._colX.copy(this._palmForward);
+            this._colY.copy(this._palmNormal).negate();
+            this._colZ.crossVectors(this._colX, this._colY).normalize();
+          } else {
+            this._colX.copy(this._palmForward).negate();
+            this._colY.copy(this._palmNormal).negate();
+            this._colZ.crossVectors(this._colX, this._colY).normalize();
+          }
 
+          this._palmRotMatrix.makeBasis(this._colX, this._colY, this._colZ);
           this._targetHandQ.setFromRotationMatrix(this._palmRotMatrix);
 
-          // Convert to lowerArm space
-          lNode.getWorldQuaternion(this._scratchQ1);
-          this._scratchQ1.invert();
-          this._targetHandQ.premultiply(this._scratchQ1);
+          // Convert target hand world quaternion to lower arm local space
+          this._targetHandQ.premultiply(this._lowerInvQ);
 
           if (Number.isFinite(this._targetHandQ.x)) {
             hasHandOrientation = true;
@@ -539,19 +541,12 @@ export class ArmRig {
       }
     }
 
-    // Fallback: if hands lost but pose wrist is tracked
     if (!hasHandOrientation) {
-      if (poseFingers && poseFingers.length >= 2) {
-        // Approximate hand orientation from pose index and pinky (landmarks 19/20 and 17/18)
-        this._targetHandQ.copy(this.currentHandQ);
-      } else {
-        // Keep last valid hand quaternion
-        this._targetHandQ.copy(this.currentHandQ);
-      }
+      // Fallback: keep hand aligned with lower arm
+      this._targetHandQ.identity();
     }
 
-    // Twist Distribution (Stage 2 & 3): 50% twist on lowerArm, 50% on hand
-    // Decompose hand rotation around forearm bone axis
+    // Distribute 50% forearm twist
     const boneAxis = this.restLowerArmDir;
     const twistAngle = 2.0 * Math.atan2(
       this._targetHandQ.x * boneAxis.x + this._targetHandQ.y * boneAxis.y + this._targetHandQ.z * boneAxis.z,
@@ -559,27 +554,14 @@ export class ArmRig {
     );
     if (Number.isFinite(twistAngle)) {
       this._scratchQ1.setFromAxisAngle(boneAxis, twistAngle * 0.5);
-      this._targetLowerQ.multiply(this._scratchQ1);
-      // Remove half twist from hand
+      this.currentLowerQ.multiply(this._scratchQ1);
+      lNode.quaternion.copy(this.currentLowerQ);
+
       this._scratchQ2.setFromAxisAngle(boneAxis, -twistAngle * 0.5);
       this._targetHandQ.multiply(this._scratchQ2);
     }
 
-    // Slerp to target with velocity-adaptive smoothing
-    // High velocity = fast tracking (slerp 0.6+), low velocity = steady (slerp 0.25)
-    const smoothFactor = THREE.MathUtils.lerp(0.25, 0.65, Math.min(1.0, handSens));
-
-    // Blend between Idle A-pose and Tracked Pose based on transitionAlpha
-    this._scratchQ1.setFromEuler(this.idleUpperEuler);
-    this._targetUpperQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
-    this.currentUpperQ.slerp(this._targetUpperQ, smoothFactor);
-    uNode.quaternion.copy(this.currentUpperQ);
-
-    this._scratchQ1.setFromEuler(this.idleLowerEuler);
-    this._targetLowerQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
-    this.currentLowerQ.slerp(this._targetLowerQ, smoothFactor);
-    lNode.quaternion.copy(this.currentLowerQ);
-
+    // Blend Hand with Idle
     this._scratchQ1.setFromEuler(this.idleHandEuler);
     this._targetHandQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
     this.currentHandQ.slerp(this._targetHandQ, smoothFactor);
@@ -599,7 +581,6 @@ export class ArmRig {
     const prefix = this.side; // 'left' | 'right'
 
     if (handLandmarks && handLandmarks.length === 21) {
-      // 4 Fingers: Index, Middle, Ring, Little
       const fingerDefs: { name: string; indices: [number, number, number, number] }[] = [
         { name: 'Index', indices: [5, 6, 7, 8] },
         { name: 'Middle', indices: [9, 10, 11, 12] },
@@ -625,9 +606,9 @@ export class ArmRig {
         const nodeI = vrm.humanoid.getNormalizedBoneNode(`${prefix}${def.name}Intermediate` as VRMHumanBoneName);
         const nodeD = vrm.humanoid.getNormalizedBoneNode(`${prefix}${def.name}Distal` as VRMHumanBoneName);
 
-        if (nodeP) nodeP.quaternion.slerp(rotProximal, 0.35);
-        if (nodeI) nodeI.quaternion.slerp(rotIntermediate, 0.35);
-        if (nodeD) nodeD.quaternion.slerp(rotDistal, 0.35);
+        if (nodeP) nodeP.quaternion.slerp(rotProximal, 0.4);
+        if (nodeI) nodeI.quaternion.slerp(rotIntermediate, 0.4);
+        if (nodeD) nodeD.quaternion.slerp(rotDistal, 0.4);
       }
 
       // Thumb
@@ -647,17 +628,19 @@ export class ArmRig {
       const nodeTP = vrm.humanoid.getNormalizedBoneNode(`${prefix}ThumbProximal` as VRMHumanBoneName);
       const nodeTD = vrm.humanoid.getNormalizedBoneNode(`${prefix}ThumbDistal` as VRMHumanBoneName);
 
-      if (nodeTM) nodeTM.quaternion.slerp(rotMeta, 0.35);
-      if (nodeTP) nodeTP.quaternion.slerp(rotProx, 0.35);
-      if (nodeTD) nodeTD.quaternion.slerp(rotDist, 0.35);
+      if (nodeTM) nodeTM.quaternion.slerp(rotMeta, 0.4);
+      if (nodeTP) nodeTP.quaternion.slerp(rotProx, 0.4);
+      if (nodeTD) nodeTD.quaternion.slerp(rotDist, 0.4);
     } else {
-      // Relax fingers smoothly towards neutral over ~1 second
-      const relaxRate = Math.min(1.0, dt * 2.0);
-      const fingerNames = ['ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal',
+      // Relax fingers towards neutral
+      const relaxRate = Math.min(1.0, dt * 2.5);
+      const fingerNames = [
+        'ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal',
         'IndexProximal', 'IndexIntermediate', 'IndexDistal',
         'MiddleProximal', 'MiddleIntermediate', 'MiddleDistal',
         'RingProximal', 'RingIntermediate', 'RingDistal',
-        'LittleProximal', 'LittleIntermediate', 'LittleDistal'];
+        'LittleProximal', 'LittleIntermediate', 'LittleDistal'
+      ];
 
       const identQ = new THREE.Quaternion();
       for (const fName of fingerNames) {
@@ -670,33 +653,30 @@ export class ArmRig {
   }
 
   /**
-   * Smoothly returns all arm and finger bones to rest A-pose
+   * Smoothly resets arm to idle A-pose
    */
   public applyIdlePose(vrm: VRM, rate = 0.15) {
     if (!vrm.humanoid) return;
-    const upperName = (this.side + 'UpperArm') as VRMHumanBoneName;
-    const lowerName = (this.side + 'LowerArm') as VRMHumanBoneName;
-    const handName = (this.side + 'Hand') as VRMHumanBoneName;
-
-    const uNode = vrm.humanoid.getNormalizedBoneNode(upperName);
-    const lNode = vrm.humanoid.getNormalizedBoneNode(lowerName);
-    const hNode = vrm.humanoid.getNormalizedBoneNode(handName);
+    const uNode = vrm.humanoid.getNormalizedBoneNode((this.side + 'UpperArm') as VRMHumanBoneName);
+    const lNode = vrm.humanoid.getNormalizedBoneNode((this.side + 'LowerArm') as VRMHumanBoneName);
+    const hNode = vrm.humanoid.getNormalizedBoneNode((this.side + 'Hand') as VRMHumanBoneName);
 
     this._scratchQ1.setFromEuler(this.idleUpperEuler);
-    if (uNode) uNode.quaternion.slerp(this._scratchQ1, rate);
+    this._scratchQ2.setFromEuler(this.idleLowerEuler);
+    const identQ = new THREE.Quaternion();
 
-    this._scratchQ1.setFromEuler(this.idleLowerEuler);
-    if (lNode) lNode.quaternion.slerp(this._scratchQ1, rate);
+    this.currentUpperQ.slerp(this._scratchQ1, rate);
+    this.currentLowerQ.slerp(this._scratchQ2, rate);
+    this.currentHandQ.slerp(identQ, rate);
 
-    this._scratchQ1.setFromEuler(this.idleHandEuler);
-    if (hNode) hNode.quaternion.slerp(this._scratchQ1, rate);
+    if (uNode) uNode.quaternion.copy(this.currentUpperQ);
+    if (lNode) lNode.quaternion.copy(this.currentLowerQ);
+    if (hNode) hNode.quaternion.copy(this.currentHandQ);
 
-    this.currentUpperQ.setFromEuler(this.idleUpperEuler);
-    this.currentLowerQ.setFromEuler(this.idleLowerEuler);
-    this.currentHandQ.setFromEuler(this.idleHandEuler);
+    this.debugInfo.elbowAngleDeg = 0;
   }
 
-  public reset() {
+  public resetFilters() {
     this.state = 'REST';
     this.transitionAlpha = 0;
     this.filterShoulder.reset();
@@ -714,7 +694,7 @@ export class ArmDebugVisualizer {
   private lineRight: THREE.Line;
   private geomLeft: THREE.BufferGeometry;
   private geomRight: THREE.BufferGeometry;
-  private isVisible = false;
+  public isVisible = false;
 
   constructor(scene: THREE.Scene) {
     this.geomLeft = new THREE.BufferGeometry().setFromPoints([
@@ -725,18 +705,18 @@ export class ArmDebugVisualizer {
     ]);
 
     const matLeft = new THREE.LineBasicMaterial({
-      color: 0x06b6d4, // Cyan
-      linewidth: 3,
+      color: 0x06b6d4, // Cyan for left arm
+      linewidth: 4,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.85,
       depthTest: false,
     });
 
     const matRight = new THREE.LineBasicMaterial({
-      color: 0xec4899, // Pink
-      linewidth: 3,
+      color: 0xec4899, // Pink for right arm
+      linewidth: 4,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.85,
       depthTest: false,
     });
 
@@ -760,7 +740,7 @@ export class ArmDebugVisualizer {
   public update(leftRig: ArmRig, rightRig: ArmRig) {
     if (!this.isVisible) return;
 
-    // Update Left Line points
+    // Left Line: shoulder -> elbow -> wrist
     const ptsL = [
       leftRig.debugInfo.trackedShoulder,
       leftRig.debugInfo.trackedElbow,
@@ -768,7 +748,7 @@ export class ArmDebugVisualizer {
     ];
     this.geomLeft.setFromPoints(ptsL);
 
-    // Update Right Line points
+    // Right Line: shoulder -> elbow -> wrist
     const ptsR = [
       rightRig.debugInfo.trackedShoulder,
       rightRig.debugInfo.trackedElbow,

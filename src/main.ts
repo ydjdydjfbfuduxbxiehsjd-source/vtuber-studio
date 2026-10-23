@@ -1,6 +1,6 @@
 ﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log(
-  '%c VTuber Studio PRO %c v1.2.0 build 2026-10-23 23:00 %c feature/arm-tracking-rewrite ',
+  '%c VTuber Studio PRO %c v1.2.1 build 2026-10-23 23:30 %c feature/arm-tracking-rewrite ',
   'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
   'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
   'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
@@ -36,8 +36,7 @@ interface TrackingSettings {
   headSens: number;
   handSens: number;
   mouthSens: number;
-  eyeSens: number;
-  gestureEmotes: boolean;
+  eyeSens: number;
   armCollision: boolean;
   reachMultiplier: number;
   torso: boolean;
@@ -60,8 +59,7 @@ const settings: TrackingSettings = {
   headSens: 1.0,
   handSens: 1.0,
   mouthSens: 1.2,
-  eyeSens: 1.0,
-  gestureEmotes: true,
+  eyeSens: 1.0,
   armCollision: true,
   reachMultiplier: 1.15,
   torso: true,
@@ -203,6 +201,10 @@ function resetEntireArmToIdle(side: 'left' | 'right') {
     }
     relaxFingers('right');
   }
+}
+
+function showEmotionToast(icon: string, title: string, desc: string) {
+  console.log(`[VTuber Studio] ${icon} ${title}: ${desc}`);
 }
 
 function applyRestingPose() {
@@ -431,17 +433,11 @@ function setExpression(name: string, value: number) {
   currentVrm.expressionManager.setValue(name, THREE.MathUtils.clamp(value, 0, 1));
 }
 /* ==========================================================================
-   ENHANCED PRESET EMOTIONS SYSTEM
+   PRESET EMOTIONS SYSTEM (MANUAL)
    ========================================================================== */
-export type RecognizedGesture = 'NONE' | 'ROCK' | 'PEACE' | 'THUMBS_UP' | 'FIST' | 'OPEN_PALM';
-
 export type EmotionPresetId =
-  | 'AUTO'
   | 'NEUTRAL'
   | 'HAPPY'
-  | 'THUMBS_UP'
-  | 'PEACE'
-  | 'ROCK'
   | 'SURPRISED'
   | 'ANGRY'
   | 'RELAXED'
@@ -462,81 +458,29 @@ interface EmotionPresetDef {
   name: string;
   icon: string;
   desc: string;
-  guideId: string;
   values: EmotionValues;
 }
 
 const EMOTION_PRESETS: Record<EmotionPresetId, EmotionPresetDef> = {
-  AUTO: {
-    id: 'AUTO',
-    name: 'Авто (По жестам)',
-    icon: '✨',
-    desc: 'Распознавание жестов рук и адаптивная мимика',
-    guideId: '',
-    values: { happy: 0, relaxed: 0, surprised: 0, angry: 0, sad: 0, mouthSmile: 0, mouthOpen: 0 },
-  },
   NEUTRAL: {
     id: 'NEUTRAL',
     name: 'Нейтрально',
     icon: '😐',
     desc: 'Чистое естественное отслеживание с веб-камеры',
-    guideId: '',
     values: { happy: 0, relaxed: 0, surprised: 0, angry: 0, sad: 0, mouthSmile: 0, mouthOpen: 0 },
-  },
-  THUMBS_UP: {
-    id: 'THUMBS_UP',
-    name: 'Одобрение / Респект',
-    icon: '👍',
-    desc: 'Уверенная дружеская улыбка, открытые глаза',
-    guideId: 'guide-thumbs',
-    values: { happy: 0.85, relaxed: 0.35, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.6, mouthOpen: 0.05 },
-  },
-  PEACE: {
-    id: 'PEACE',
-    name: 'Победа / Peace',
-    icon: '✌️',
-    desc: 'Милая аниме-улыбка, сияющие глаза',
-    guideId: 'guide-peace',
-    values: { happy: 0.95, relaxed: 0.45, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.65, mouthOpen: 0.08 },
-  },
-  ROCK: {
-    id: 'ROCK',
-    name: 'Рок / Драйв',
-    icon: '🤘',
-    desc: 'Энергичный рок-н-ролл взгляд (глаза полностью открыты)',
-    guideId: 'guide-rock',
-    values: { happy: 0.75, relaxed: 0, surprised: 0.2, angry: 0, sad: 0, mouthSmile: 0.5, mouthOpen: 0.12 },
-  },
-  OPEN_PALM: {
-    id: 'OPEN_PALM',
-    name: 'Приветствие',
-    icon: '🖐️',
-    desc: 'Тёплое открытое приветствие',
-    guideId: 'guide-palm',
-    values: { happy: 0.75, relaxed: 0.3, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.5, mouthOpen: 0.04 },
   },
   HAPPY: {
     id: 'HAPPY',
     name: 'Радость',
     icon: '😊',
     desc: 'Яркая открытая радостная улыбка',
-    guideId: '',
     values: { happy: 0.9, relaxed: 0.4, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.7, mouthOpen: 0.05 },
-  },
-  ANGRY: {
-    id: 'ANGRY',
-    name: 'Решимость / Бой',
-    icon: '✊',
-    desc: 'Сосредоточенный решительный боевой взгляд',
-    guideId: 'guide-fist',
-    values: { happy: 0, relaxed: 0, surprised: 0, angry: 0.55, sad: 0, mouthSmile: 0, mouthOpen: 0 },
   },
   SURPRISED: {
     id: 'SURPRISED',
     name: 'Удивление',
     icon: '😲',
     desc: 'Широко открытые глаза и приоткрытый рот',
-    guideId: '',
     values: { happy: 0, relaxed: 0, surprised: 0.85, angry: 0, sad: 0, mouthSmile: 0, mouthOpen: 0.28 },
   },
   RELAXED: {
@@ -544,14 +488,26 @@ const EMOTION_PRESETS: Record<EmotionPresetId, EmotionPresetDef> = {
     name: 'Спокойствие',
     icon: '😌',
     desc: 'Мягкое гармоничное умиротворение',
-    guideId: '',
     values: { happy: 0.4, relaxed: 0.8, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.3, mouthOpen: 0 },
+  },
+  ANGRY: {
+    id: 'ANGRY',
+    name: 'Решимость / Бой',
+    icon: '✊',
+    desc: 'Сосредоточенный решительный боевой взгляд',
+    values: { happy: 0, relaxed: 0, surprised: 0, angry: 0.55, sad: 0, mouthSmile: 0, mouthOpen: 0 },
+  },
+  OPEN_PALM: {
+    id: 'OPEN_PALM',
+    name: 'Приветствие',
+    icon: '🖐️',
+    desc: 'Тёплое открытое приветствие',
+    values: { happy: 0.75, relaxed: 0.3, surprised: 0, angry: 0, sad: 0, mouthSmile: 0.5, mouthOpen: 0.04 },
   },
 };
 
 // Current Emotion State Manager
-let selectedEmotionMode: EmotionPresetId = 'AUTO';
-let currentActiveGesture: RecognizedGesture = 'NONE';
+let selectedEmotionMode: EmotionPresetId = 'NEUTRAL';
 
 // Smoothed blended emotion weights
 const blendedEmotion: EmotionValues = {
@@ -563,93 +519,6 @@ const blendedEmotion: EmotionValues = {
   mouthSmile: 0,
   mouthOpen: 0,
 };
-
-// Toast HUD & UI feedback
-const toastEl = document.getElementById('gesture-toast');
-const toastIcon = document.getElementById('gesture-toast-icon');
-const toastTitle = document.getElementById('gesture-toast-title');
-const toastDesc = document.getElementById('gesture-toast-desc');
-
-function showEmotionToast(icon: string, title: string, desc: string) {
-  if (toastEl && toastIcon && toastTitle && toastDesc) {
-    toastIcon.textContent = icon;
-    toastTitle.textContent = title;
-    toastDesc.textContent = desc;
-    toastEl.classList.remove('hidden');
-  }
-}
-
-function hideEmotionToast() {
-  if (toastEl) toastEl.classList.add('hidden');
-}
-
-function updateEmotionUI(activeId: EmotionPresetId, gesture: RecognizedGesture) {
-  // Update guide highlights
-  document.querySelectorAll('.gesture-item').forEach((item) => item.classList.remove('active'));
-
-  if (activeId !== 'NEUTRAL' && activeId !== 'AUTO') {
-    const preset = EMOTION_PRESETS[activeId];
-    if (preset) {
-      showEmotionToast(preset.icon, preset.name, preset.desc);
-      if (preset.guideId) {
-        const guideEl = document.getElementById(preset.guideId);
-        if (guideEl) guideEl.classList.add('active');
-      }
-    }
-  } else if (activeId === 'AUTO' && gesture !== 'NONE') {
-    const gestureKey = gesture as EmotionPresetId;
-    const preset = EMOTION_PRESETS[gestureKey];
-    if (preset) {
-      showEmotionToast(preset.icon, preset.name, preset.desc);
-      if (preset.guideId) {
-        const guideEl = document.getElementById(preset.guideId);
-        if (guideEl) guideEl.classList.add('active');
-      }
-    }
-  } else {
-    hideEmotionToast();
-  }
-}
-/* ==========================================================================
-   AI HAND GESTURE RECOGNITION & FINGER POSING
-   ========================================================================== */
-function detectHandGesture(lm: any[] | null | undefined): RecognizedGesture {
-  if (!lm || lm.length < 21) return 'NONE';
-  const p0 = lm[0];
-
-  const isExtended = (tipIdx: number, pipIdx: number) => {
-    const dTip = Math.hypot(lm[tipIdx].x - p0.x, lm[tipIdx].y - p0.y, lm[tipIdx].z - p0.z);
-    const dPip = Math.hypot(lm[pipIdx].x - p0.x, lm[pipIdx].y - p0.y, lm[pipIdx].z - p0.z);
-    return dTip > dPip * 1.15;
-  };
-
-  const indexOpen = isExtended(8, 6);
-  const middleOpen = isExtended(12, 10);
-  const ringOpen = isExtended(16, 14);
-  const pinkyOpen = isExtended(20, 18);
-
-  // Thumb open check
-  const dThumbIndex = Math.hypot(lm[4].x - lm[5].x, lm[4].y - lm[5].y, lm[4].z - lm[5].z);
-  const dThumbPip = Math.hypot(lm[3].x - lm[5].x, lm[3].y - lm[5].y, lm[3].z - lm[5].z);
-  const thumbOpen = dThumbIndex > dThumbPip * 1.05;
-
-  // 1. ROCK / Коза
-  if (indexOpen && pinkyOpen && !middleOpen && !ringOpen) return 'ROCK';
-
-  // 2. PEACE / Знак V
-  if (indexOpen && middleOpen && !ringOpen && !pinkyOpen) return 'PEACE';
-
-  // 3. THUMBS UP Большой палец вверх
-  if (thumbOpen && !indexOpen && !middleOpen && !ringOpen && !pinkyOpen) return 'THUMBS_UP';
-
-  // 4. FIST Кулак
-  if (!thumbOpen && !indexOpen && !middleOpen && !ringOpen && !pinkyOpen) return 'FIST';
-
-  // 5. OPEN PALM Ладонь
-  if (thumbOpen && indexOpen && middleOpen && ringOpen && pinkyOpen) return 'OPEN_PALM';
-
-  return 'NONE';
-}
 
 /**
  * Robust 3D Vector Inverse Kinematics for Arms
@@ -1410,31 +1279,8 @@ function onHolisticResults(results: any) {
 
   if (!currentVrm) return;
 
-  // 1. GESTURE RECOGNITION FOR EMOTIONS
-  // Detect if either hand is currently touching / resting on the face
-  // Hands and fingers tracked directly from 21 MediaPipe landmarks
-
-  const rawRight = detectHandGesture(results.rightHandLandmarks);
-  const rawLeft = detectHandGesture(results.leftHandLandmarks);
-  // When resting hand on face, do not trigger false waving (OPEN_PALM) or rock
-  const gestureRight = rawRight;
-  const gestureLeft = rawLeft;
-  currentActiveGesture = gestureRight !== 'NONE' ? gestureRight : gestureLeft;
-
-  // Target Emotion Values based on mode & gesture
-  let targetEmotion: EmotionValues = EMOTION_PRESETS.NEUTRAL.values;
-
-  if (selectedEmotionMode !== 'AUTO') {
-    targetEmotion = EMOTION_PRESETS[selectedEmotionMode]?.values || EMOTION_PRESETS.NEUTRAL.values;
-    updateEmotionUI(selectedEmotionMode, currentActiveGesture);
-  } else if (settings.gestureEmotes && currentActiveGesture !== 'NONE') {
-    const gestureKey = currentActiveGesture as EmotionPresetId;
-    targetEmotion = EMOTION_PRESETS[gestureKey]?.values || EMOTION_PRESETS.NEUTRAL.values;
-    updateEmotionUI('AUTO', currentActiveGesture);
-  } else {
-    targetEmotion = EMOTION_PRESETS.NEUTRAL.values;
-    updateEmotionUI('AUTO', 'NONE');
-  }
+  // 1. Target Emotion Values based on active manual preset
+  const targetEmotion: EmotionValues = EMOTION_PRESETS[selectedEmotionMode]?.values || EMOTION_PRESETS.NEUTRAL.values;
 
   // Smoothly blend emotion values towards target
   const blendRate = 0.16;
@@ -1779,13 +1625,13 @@ function onHolisticResults(results: any) {
         // MODERN FORWARD KINEMATICS (FK) ARM RIG (Stages 1-6)
         const targetRight = settings.mirror ? 'right' : 'left';
 
-        const userRightShoulder = pl ? pl[12] : null;
-        const userRightElbow = pl ? pl[14] : null;
-        const userRightWrist = pl ? pl[16] : null;
+        const userRightShoulder = wl && wl[12] ? { x: wl[12].x, y: wl[12].y, z: wl[12].z, visibility: pl?.[12]?.visibility ?? 1 } : null;
+        const userRightElbow    = wl && wl[14] ? { x: wl[14].x, y: wl[14].y, z: wl[14].z, visibility: pl?.[14]?.visibility ?? 1 } : null;
+        const userRightWrist    = wl && wl[16] ? { x: wl[16].x, y: wl[16].y, z: wl[16].z, visibility: pl?.[16]?.visibility ?? 1 } : null;
 
-        const userLeftShoulder = pl ? pl[11] : null;
-        const userLeftElbow = pl ? pl[13] : null;
-        const userLeftWrist = pl ? pl[15] : null;
+        const userLeftShoulder  = wl && wl[11] ? { x: wl[11].x, y: wl[11].y, z: wl[11].z, visibility: pl?.[11]?.visibility ?? 1 } : null;
+        const userLeftElbow     = wl && wl[13] ? { x: wl[13].x, y: wl[13].y, z: wl[13].z, visibility: pl?.[13]?.visibility ?? 1 } : null;
+        const userLeftWrist     = wl && wl[15] ? { x: wl[15].x, y: wl[15].y, z: wl[15].z, visibility: pl?.[15]?.visibility ?? 1 } : null;
 
         if (targetRight === 'right') {
           if (settings.rightHand) {
@@ -2250,12 +2096,6 @@ document.getElementById('input-torso-sens')?.addEventListener('input', (e) => {
   if (label) label.textContent = `${(val / 10).toFixed(1)}x`;
 });
 
-document.getElementById('toggle-gestures')?.addEventListener('change', (e) => {
-  settings.gestureEmotes = (e.target as HTMLInputElement).checked;
-  if (!settings.gestureEmotes) {
-    updateEmotionUI(selectedEmotionMode, 'NONE');
-  }
-});
 
 // Emotion Palette Grid Buttons
 document.querySelectorAll('.emotion-btn').forEach((btn) => {
@@ -2266,7 +2106,7 @@ document.querySelectorAll('.emotion-btn').forEach((btn) => {
     const emotionId = (btn as HTMLElement).dataset.emotion as EmotionPresetId;
     if (emotionId) {
       selectedEmotionMode = emotionId;
-      updateEmotionUI(selectedEmotionMode, currentActiveGesture);
+      // active manual emotion preset updated
     }
   });
 });
@@ -2458,7 +2298,9 @@ restoreBtn.addEventListener('click', toggleUIVisibility);
 
 // Keyboard shortcuts
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyH') {
+  if (e.code === 'KeyD') {
+    toggleDebugMode();
+  } else if (e.code === 'KeyH') {
     toggleUIVisibility();
   } else if (e.code === 'Space') {
     e.preventDefault();

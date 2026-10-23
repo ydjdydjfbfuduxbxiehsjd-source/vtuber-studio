@@ -203,3 +203,141 @@ describe('Modern Arm Rig - State Machine (Stage 5)', () => {
     expect(rig.state).toBe('REST');
   });
 });
+describe('User Requirements Verification Suite (v1.2.1)', () => {
+  function createMockVRM() {
+    const root = new THREE.Object3D();
+    const spine = new THREE.Object3D();
+    const chest = new THREE.Object3D();
+    root.add(spine);
+    spine.add(chest);
+
+    const bones: Record<string, THREE.Object3D> = { spine, chest };
+
+    for (const side of ['left', 'right']) {
+      const isLeft = side === 'left';
+      const shoulder = new THREE.Object3D();
+      const upperArm = new THREE.Object3D();
+      const lowerArm = new THREE.Object3D();
+      const hand = new THREE.Object3D();
+
+      shoulder.position.set(isLeft ? 0.15 : -0.15, 0.4, 0);
+      upperArm.position.set(isLeft ? 0.05 : -0.05, 0, 0);
+      lowerArm.position.set(isLeft ? 0.25 : -0.25, 0, 0);
+      hand.position.set(isLeft ? 0.22 : -0.22, 0, 0);
+
+      chest.add(shoulder);
+      shoulder.add(upperArm);
+      upperArm.add(lowerArm);
+      lowerArm.add(hand);
+
+      bones[`${side}Shoulder`] = shoulder;
+      bones[`${side}UpperArm`] = upperArm;
+      bones[`${side}LowerArm`] = lowerArm;
+      bones[`${side}Hand`] = hand;
+    }
+
+    root.updateWorldMatrix(true, true);
+
+    return {
+      root,
+      bones,
+      vrm: {
+        humanoid: {
+          getNormalizedBoneNode: (name: string) => bones[name] || null,
+        },
+      } as any,
+    };
+  }
+
+  it('1. Рука вверх: correctly rotates upper and lower arm when arm is pointed straight up (+Y)', () => {
+    const { vrm, bones } = createMockVRM();
+    const rig = new ArmRig('left');
+    rig.initFromVRM(vrm);
+
+    // Shoulder at (0.2, 0.4, 0), Elbow at (0.2, 0.65, 0), Wrist at (0.2, 0.90, 0)
+    // In MediaPipe world coordinates: -Y is up
+    const s: Landmark3D = { x: 0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const e: Landmark3D = { x: 0.2, y: -0.65, z: 0, visibility: 1.0 };
+    const w: Landmark3D = { x: 0.2, y: -0.90, z: 0, visibility: 1.0 };
+
+    for (let t = 0; t < 15; t++) {
+      rig.update(vrm, s, e, w, null, null, true, 1000 + t * 16, 1.0);
+    }
+
+    const uNode = bones['leftUpperArm'];
+    const worldDir = new THREE.Vector3(1, 0, 0).applyQuaternion(uNode.quaternion);
+    expect(worldDir.y).toBeGreaterThan(0.85); // Pointing up
+    expect(rig.debugInfo.elbowAngleDeg).toBeCloseTo(0, 1); // Straight arm
+  });
+
+  it('2. Рука вперёд: correctly rotates upper and lower arm when arm is pointed straight forward (+Z)', () => {
+    const { vrm, bones } = createMockVRM();
+    const rig = new ArmRig('left');
+    rig.initFromVRM(vrm);
+
+    // Shoulder at (0.2, 0.4, 0), Elbow at (0.2, 0.4, 0.25), Wrist at (0.2, 0.4, 0.50)
+    // In MediaPipe world coordinates: -Z is towards camera
+    const s: Landmark3D = { x: 0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const e: Landmark3D = { x: 0.2, y: -0.4, z: -0.25, visibility: 1.0 };
+    const w: Landmark3D = { x: 0.2, y: -0.4, z: -0.50, visibility: 1.0 };
+
+    for (let t = 0; t < 15; t++) {
+      rig.update(vrm, s, e, w, null, null, true, 1000 + t * 16, 1.0);
+    }
+
+    const uNode = bones['leftUpperArm'];
+    const worldDir = new THREE.Vector3(1, 0, 0).applyQuaternion(uNode.quaternion);
+    expect(worldDir.z).toBeGreaterThan(0.85); // Pointing forward towards camera (+Z)
+    expect(rig.debugInfo.elbowAngleDeg).toBeCloseTo(0, 1);
+  });
+
+  it('3. Локоть согнут на 90°: computes 90-degree elbow angle and bent forearm pose', () => {
+    const { vrm } = createMockVRM();
+    const rig = new ArmRig('left');
+    rig.initFromVRM(vrm);
+
+    // Upper arm forward (z: -0.25 in MP -> +0.25 avatar)
+    // Forearm vertical up (y: -0.65 in MP -> +0.65 avatar)
+    const s: Landmark3D = { x: 0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const e: Landmark3D = { x: 0.2, y: -0.4, z: -0.25, visibility: 1.0 };
+    const w: Landmark3D = { x: 0.2, y: -0.65, z: -0.25, visibility: 1.0 };
+
+    rig.update(vrm, s, e, w, null, null, true, 1000, 1.0);
+    expect(rig.debugInfo.elbowAngleDeg).toBeCloseTo(90, 0);
+  });
+
+  it('4. Правая рука не меняется с левой: right arm updates while left arm stays in resting A-pose', () => {
+    const { vrm, bones } = createMockVRM();
+    const rigLeft = new ArmRig('left');
+    const rigRight = new ArmRig('right');
+    rigLeft.initFromVRM(vrm);
+    rigRight.initFromVRM(vrm);
+
+    // Initial state: both REST
+    expect(rigLeft.state).toBe('REST');
+    expect(rigRight.state).toBe('REST');
+
+    // User raises physical RIGHT arm (-X in MediaPipe):
+    const sRight: Landmark3D = { x: -0.2, y: -0.4, z: 0, visibility: 1.0 };
+    const eRight: Landmark3D = { x: -0.2, y: -0.65, z: 0, visibility: 1.0 };
+    const wRight: Landmark3D = { x: -0.2, y: -0.90, z: 0, visibility: 1.0 };
+
+    for (let t = 0; t < 10; t++) {
+      rigRight.update(vrm, sRight, eRight, wRight, null, null, true, 1000 + t * 16, 1.0);
+      rigLeft.applyIdlePose(vrm, 0.15);
+    }
+
+    expect(rigRight.state).toBe('ACTIVE');
+    expect(rigLeft.state).toBe('REST');
+
+    // Right arm is raised up (+Y)
+    const rNode = bones['rightUpperArm'];
+    const rDir = new THREE.Vector3(-1, 0, 0).applyQuaternion(rNode.quaternion);
+    expect(rDir.y).toBeGreaterThan(0.7);
+
+    // Left arm remains pointed down in A-pose
+    const lNode = bones['leftUpperArm'];
+    const lDir = new THREE.Vector3(1, 0, 0).applyQuaternion(lNode.quaternion);
+    expect(lDir.y).toBeLessThan(0); // Downward orientation in resting A-pose
+  });
+});

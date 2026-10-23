@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "projects",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "scripts": {
     "start": "node server.cjs",
@@ -25,3 +25,4 @@
     "three": "^0.186.1"
   }
 }
+
