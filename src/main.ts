@@ -802,6 +802,14 @@ export interface FaceTouchState {
   lastTimestamp: number;
 }
 
+/* ==========================================================================
+   ELBOW POLE VECTOR CACHE & ANATOMICAL CONSTRAINTS (STAGE 5)
+   ========================================================================== */
+export const lastGoodElbowVec: { left: THREE.Vector3; right: THREE.Vector3 } = {
+  left: new THREE.Vector3(0.35, -0.75, -0.2).normalize(),
+  right: new THREE.Vector3(-0.35, -0.75, -0.2).normalize(),
+};
+
 export const faceTouchState: { left: FaceTouchState; right: FaceTouchState } = {
   left: { isActive: false, weight: 0.0, lastTimestamp: 0 },
   right: { isActive: false, weight: 0.0, lastTimestamp: 0 },
@@ -815,7 +823,9 @@ function solveArmVectorIK(
   handLM: any[] | null | undefined,
   _isUserRight: boolean,
   faceLM?: any[] | null,
-  armScale: number = 1.0
+  armScale: number = 1.0,
+  shoulderVis: number = 1.0,
+  elbowVis: number = 1.0
 ) {
   if (!currentVrm || !currentVrm.humanoid) return;
 
@@ -957,13 +967,34 @@ function solveArmVectorIK(
   const cosAlpha = (L1_avatar * L1_avatar + dClamped * dClamped - L2_avatar * L2_avatar) / (2 * L1_avatar * dClamped);
   const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
 
-  // 6. Elbow Direction from MediaPipe Pose (with dampened Z 0.4x)
-  const vUserElbow = new THREE.Vector3(
-    (E3d.x - S3d.x) * mirrorX,
-    -(E3d.y - S3d.y),
-    -(E3d.z - S3d.z) * 0.4 // Dampened Z coordinate (Stage 3: 0.4x)
-  );
-  if (vUserElbow.lengthSq() < 1e-6) vUserElbow.set(isLeft ? 0.3 : -0.3, -0.7, -0.2);
+  // 6. Elbow Direction from MediaPipe Pose with Visibility Caching & Anatomical Constraints (Stage 5)
+  const vUserElbow = new THREE.Vector3();
+  if (shoulderVis >= 0.5 && elbowVis >= 0.5) {
+    vUserElbow.set(
+      (E3d.x - S3d.x) * mirrorX,
+      -(E3d.y - S3d.y),
+      -(E3d.z - S3d.z) * 0.4
+    );
+    if (vUserElbow.lengthSq() > 1e-5) {
+      lastGoodElbowVec[targetSide].copy(vUserElbow).normalize();
+    } else {
+      vUserElbow.copy(lastGoodElbowVec[targetSide]);
+    }
+  } else {
+    // Visibility of shoulder or elbow < 0.5: smoothly fallback to last good direction vector
+    vUserElbow.copy(lastGoodElbowVec[targetSide]);
+  }
+
+  // Anatomical constraint: prevent elbow from going inside the torso or flipping unnaturally upwards
+  const defaultDownOut = new THREE.Vector3(isLeft ? 0.45 : -0.45, -0.75, -0.15).normalize();
+  const inwardPenalty = isLeft ? Math.max(0, 0.08 - vUserElbow.x) : Math.max(0, vUserElbow.x + 0.08);
+  const upwardTolerance = targetWristPos.y > shoulderPos.y + 0.1 ? 0.45 : 0.05;
+  const upwardPenalty = Math.max(0, vUserElbow.y - upwardTolerance);
+
+  const correctionWeight = THREE.MathUtils.clamp((inwardPenalty * 4.0) + (upwardPenalty * 3.0), 0.0, 0.85);
+  if (correctionWeight > 0.01) {
+    vUserElbow.lerp(defaultDownOut, correctionWeight).normalize();
+  }
 
   // Bend plane normal: dTarget x vUserElbow
   let planeNormal = new THREE.Vector3().crossVectors(dTarget, vUserElbow).normalize();
@@ -1630,7 +1661,7 @@ function onHolisticResults(results: any) {
 
       // User Right Arm
       if (settings.rightHand && isRightActive) {
-        solveArmVectorIK(targetRightArm, s12, e14, w16, activeRightHandLM, true, results.faceLandmarks, armScale);
+        solveArmVectorIK(targetRightArm, s12, e14, w16, activeRightHandLM, true, results.faceLandmarks, armScale, pl[12]?.visibility ?? 1.0, pl[14]?.visibility ?? 1.0);
         updateHandBadge(rightHandBadge, true);
       } else {
         lastValidRightHandLM = null;
@@ -1640,7 +1671,7 @@ function onHolisticResults(results: any) {
 
       // User Left Arm
       if (settings.leftHand && isLeftActive) {
-        solveArmVectorIK(targetLeftArm, s11, e13, w15, activeLeftHandLM, false, results.faceLandmarks, armScale);
+        solveArmVectorIK(targetLeftArm, s11, e13, w15, activeLeftHandLM, false, results.faceLandmarks, armScale, pl[11]?.visibility ?? 1.0, pl[13]?.visibility ?? 1.0);
         updateHandBadge(leftHandBadge, true);
       } else {
         lastValidLeftHandLM = null;
