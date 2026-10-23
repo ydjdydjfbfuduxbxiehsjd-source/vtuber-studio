@@ -631,26 +631,40 @@ function detectHandGesture(lm: any[] | null | undefined): RecognizedGesture {
    BODY COLLISION RESOLUTION (Torso, Chest, Head, Hips)
    Prevents hands, forearms, and elbows from passing through the body
    ========================================================================== */
-function resolveBodyColliders(point: THREE.Vector3, minMargin = 0.035, isWristOrHand = false): THREE.Vector3 {
+function resolveBodyColliders(
+  point: THREE.Vector3,
+  minMargin = 0.035,
+  isWristOrHand = false,
+  faceTouchWeight = 0.0
+): THREE.Vector3 {
   if (!currentVrm || !currentVrm.humanoid) return point.clone();
 
   const out = point.clone();
 
-  // 1. Head Sphere Collider
-  // For wrists and hands: omit head sphere collision completely so the user's hand can touch their cheeks, chin, nose, and face!
-  // For elbows: keep head sphere collision active so elbows don't clip through the skull.
-  if (!isWristOrHand) {
-    const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
-    if (headNode) {
-      const headPos = new THREE.Vector3();
-      headNode.getWorldPosition(headPos);
-      headPos.y += 0.02; // Center on skull
-      const vHead = new THREE.Vector3().subVectors(out, headPos);
-      const headRadius = 0.11 + minMargin;
-      const distSq = vHead.lengthSq();
-      if (distSq < headRadius * headRadius && distSq > 1e-6) {
+  // 1. Head Sphere Collider (Stage 6: Soft head collision for wrist, attenuated by face-touch mode)
+  const headNode = currentVrm.humanoid.getNormalizedBoneNode('head');
+  if (headNode) {
+    const headPos = new THREE.Vector3();
+    headNode.getWorldPosition(headPos);
+    headPos.y += 0.02; // Center on skull
+    const vHead = new THREE.Vector3().subVectors(out, headPos);
+    const distSq = vHead.lengthSq();
+
+    if (isWristOrHand) {
+      // Radius ~0.07m for wrist, minimal clearance 0.005m, attenuated while face-touch mode is active
+      const collisionFactor = THREE.MathUtils.clamp(1.0 - faceTouchWeight, 0.0, 1.0);
+      const wristHeadRadius = 0.07 + 0.005;
+      if (collisionFactor > 0.01 && distSq < wristHeadRadius * wristHeadRadius && distSq > 1e-6) {
         const dist = Math.sqrt(distSq);
-        out.copy(headPos).addScaledVector(vHead.multiplyScalar(1 / dist), headRadius);
+        const pushedPos = headPos.clone().addScaledVector(vHead.multiplyScalar(1 / dist), wristHeadRadius);
+        out.lerp(pushedPos, collisionFactor);
+      }
+    } else {
+      // Elbows collide fully with head sphere so they never clip into the head
+      const elbowHeadRadius = 0.11 + minMargin;
+      if (distSq < elbowHeadRadius * elbowHeadRadius && distSq > 1e-6) {
+        const dist = Math.sqrt(distSq);
+        out.copy(headPos).addScaledVector(vHead.multiplyScalar(1 / dist), elbowHeadRadius);
       }
     }
   }
@@ -949,7 +963,7 @@ function solveArmVectorIK(
 
   // Body collision resolution on wrist (isWristOrHand = true bypasses head sphere)
   const resolvedWristPos = settings.armCollision
-    ? resolveBodyColliders(targetWristPos, 0.02, true)
+    ? resolveBodyColliders(targetWristPos, 0.02, true, ftState.weight)
     : targetWristPos;
 
   // 4. Reach vector and distance clamping (max 0.98 * (L1 + L2) to prevent locking!)
