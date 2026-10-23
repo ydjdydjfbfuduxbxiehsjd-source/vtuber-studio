@@ -10,26 +10,18 @@ echo.
 
 cd /d "%~dp0"
 
-REM 1. Check if Node.js is installed
+REM 1. Check Node.js
 where node >nul 2>nul
 if errorlevel 1 goto no_node
 
 REM 2. Check dependencies
 if not exist "node_modules\" goto do_install
-goto check_dist
+goto do_build
 
 :do_install
 echo [INFO] Installing dependencies...
 call npm install
 if errorlevel 1 goto fail_install
-
-:check_dist
-if not exist "dist\index.html" goto do_build
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command "if ((Get-Item 'src\main.ts').LastWriteTime -gt (Get-Item 'dist\index.html').LastWriteTime -or (Get-Item 'index.html').LastWriteTime -gt (Get-Item 'dist\index.html').LastWriteTime) { exit 1 } else { exit 0 }" >nul 2>nul
-if errorlevel 1 goto do_build
-
-goto run_server
 
 :do_build
 echo [INFO] Building application...
@@ -51,7 +43,7 @@ pause
 exit /b 1
 
 :fail_build
-echo [ERROR] Build failed. Please check errors above.
+echo [ERROR] Build failed.
 pause
 exit /b 1
 
@@ -62,7 +54,7 @@ if not exist "dist\index.html" (
     pause
     exit /b 1
 )
-echo [OK] Node.js not found in PATH. Launching Windows native HTTP server...
+echo [OK] Launching Windows native HTTP server...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0server.ps1"
 goto finish
 

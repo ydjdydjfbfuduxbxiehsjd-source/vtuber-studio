@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg-dark: #0e1017;
   --bg-card: rgba(18, 22, 34, 0.75);
   --bg-card-hover: rgba(28, 34, 52, 0.85);
@@ -846,4 +846,33 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 .debug-grid strong {
   color: #38bdf8;
+}
+
+/* Version Badge */
+.version-tag {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.version-tag::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  background: #34d399;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #34d399;
+}
+.version-tag-sub {
+  color: #34d399;
+  font-weight: 600;
 }

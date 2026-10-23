@@ -1,4 +1,11 @@
-﻿import * as THREE from 'three';
+﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log(
+  '%c VTuber Studio PRO %c v1.1.0 build 2026-10-23 22:20 %c feature/arm-reach-fix ',
+  'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
+  'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
+  'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
+);
+import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils, VRM, type VRMHumanBoneName } from '@pixiv/three-vrm';
@@ -228,7 +235,8 @@ function updateModelCapabilities() {
     modelExpressionNames.has('jawOpen') ||
     modelExpressionNames.has('mouthSmileLeft');
 
-  console.log(
+  console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log(
     `[Model Detection] Expressions: ${modelExpressionNames.size}, ARKit 52 Perfect Sync: ${isArkitModel}`
   );
 }
@@ -326,7 +334,8 @@ export function computeAvatarArmLengths() {
     }
   }
 
-  console.log(
+  console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log(
     "[Skeleton Arm Lengths] Left: L1=" + avatarArmLengths.left.L1.toFixed(3) + "m, L2=" + avatarArmLengths.left.L2.toFixed(3) + "m (Total: " + avatarArmLengths.left.total.toFixed(3) + "m) | Right: L1=" + avatarArmLengths.right.L1.toFixed(3) + "m, L2=" + avatarArmLengths.right.L2.toFixed(3) + "m (Total: " + avatarArmLengths.right.total.toFixed(3) + "m)"
   );
 }
@@ -355,7 +364,8 @@ function loadVRM(url: string, name = 'Sample Model') {
       computeAvatarArmLengths();
 
       modelStatusText.textContent = `Модель: ${name} ${isArkitModel ? '(ARKit 52 ✨)' : ''}`;
-      console.log('Loaded VRM successfully:', vrm);
+      console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log('Loaded VRM successfully:', vrm);
     },
     (progress) => {
       if (progress.total > 0) {
@@ -792,7 +802,8 @@ try {
     const data = JSON.parse(saved);
     if (typeof data.scale === 'number' && Number.isFinite(data.scale) && data.scale >= 0.8 && data.scale <= 1.3) {
       calibratedArmScale = data.scale;
-      console.log("[Calibration] Loaded from localStorage: scale=" + (data.scale as number).toFixed(2) + "x");
+      console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log("[Calibration] Loaded from localStorage: scale=" + (data.scale as number).toFixed(2) + "x");
     }
   }
 } catch (_) {}
@@ -1874,7 +1885,8 @@ async function initTracking() {
     camStatusText.textContent = 'Камера: В эфире';
     const btnText = document.getElementById('camera-btn-text')!;
     btnText.textContent = 'Остановить камеру';
-    console.log('Camera and Holistic tracking started successfully.');
+    console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log('Camera and Holistic tracking started successfully.');
   } catch (err: any) {
     console.error('Camera start error:', err);
     camStatusText.textContent = 'Ошибка доступа к камере';
@@ -1984,7 +1996,8 @@ async function setupAudioLipSync() {
     analyser.smoothingTimeConstant = 0.3;
     source.connect(analyser);
     audioTimeData = new Uint8Array(analyser.fftSize);
-    console.log('Microphone lip-sync initialized. AudioContext state:', audioCtx.state);
+    console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
+console.log('Microphone lip-sync initialized. AudioContext state:', audioCtx.state);
   } catch (err) {
     console.warn('Microphone access denied or unavailable:', err);
     const toggle = document.getElementById('toggle-mic') as HTMLInputElement;

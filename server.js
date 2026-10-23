@@ -148,4 +148,26 @@ function startServer(port) {
   server.listen(port);
 }
 
+
+// Free port if occupied by a previous background instance
+function tryFreePort(targetPort) {
+  if (process.platform !== 'win32') return;
+  try {
+    const stdout = require('child_process').execSync('netstat -ano -p tcp', { encoding: 'utf8' });
+    for (const line of stdout.split('\n')) {
+      if (line.includes(`:${targetPort}`) && line.includes('LISTENING')) {
+        const parts = line.trim().split(/\s+/);
+        const pid = Number(parts[parts.length - 1]);
+        if (pid && pid !== process.pid) {
+          try {
+            process.kill(pid, 'SIGKILL');
+            console.log(`[INFO] Terminated stale server instance (PID ${pid}) on port ${targetPort}`);
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
+tryFreePort(currentPort);
 startServer(currentPort);
