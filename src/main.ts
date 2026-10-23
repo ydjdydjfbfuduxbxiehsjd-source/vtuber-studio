@@ -28,12 +28,14 @@ interface TrackingSettings {
   eyeSens: number;
   gestureEmotes: boolean;
   armCollision: boolean;
+  reachMultiplier: number;
   torso: boolean;
   torsoSens: number;
   mirror: boolean;
   showSkeleton: boolean;
   bgColor: string;
 }
+
 
 const settings: TrackingSettings = {
   head: true,
@@ -49,6 +51,7 @@ const settings: TrackingSettings = {
   eyeSens: 1.0,
   gestureEmotes: true,
   armCollision: true,
+  reachMultiplier: 1.15,
   torso: true,
   torsoSens: 1.0,
   mirror: true,
@@ -826,7 +829,7 @@ function solveArmVectorIK(
   const vUserWrist = new THREE.Vector3(
     (W3d.x - S3d.x) * mirrorX,
     -(W3d.y - S3d.y),
-    -(W3d.z - S3d.z) * 0.35
+    -(W3d.z - S3d.z) * 0.4
   );
   if (vUserWrist.lengthSq() < 1e-6) vUserWrist.set(isLeft ? 0.25 : -0.25, -0.4, 0.1);
 
@@ -905,23 +908,24 @@ function solveArmVectorIK(
 
   // 4. Reach vector and distance clamping (max 0.98 * (L1 + L2) to prevent locking!)
   const vReach = new THREE.Vector3().subVectors(resolvedWristPos, shoulderPos);
-  const reachDist = vReach.length();
+  const rawReachDist = vReach.length();
+  const scaledReachDist = rawReachDist * (settings.reachMultiplier || 1.15);
   const maxReach = L_avatar * 0.98; // 0.98 * (L1 + L2)
-  const dClamped = THREE.MathUtils.clamp(reachDist, 0.03, maxReach);
+  const dClamped = THREE.MathUtils.clamp(scaledReachDist, 0.03, maxReach);
 
-  const dTarget = reachDist > 1e-6
-    ? vReach.clone().multiplyScalar(1 / reachDist)
+  const dTarget = rawReachDist > 1e-6
+    ? vReach.clone().multiplyScalar(1 / rawReachDist)
     : new THREE.Vector3(isLeft ? 0.3 : -0.3, -0.8, 0).normalize();
 
   // 5. Law of Cosines for Shoulder Angle (alpha)
   const cosAlpha = (L1_avatar * L1_avatar + dClamped * dClamped - L2_avatar * L2_avatar) / (2 * L1_avatar * dClamped);
   const alpha = Math.acos(THREE.MathUtils.clamp(cosAlpha, -1, 1));
 
-  // 6. Elbow Direction from MediaPipe Pose (with dampened Z)
+  // 6. Elbow Direction from MediaPipe Pose (with dampened Z 0.4x)
   const vUserElbow = new THREE.Vector3(
     (E3d.x - S3d.x) * mirrorX,
     -(E3d.y - S3d.y),
-    -(E3d.z - S3d.z) * 0.35 // Dampened Z coordinate (0.3 - 0.5)
+    -(E3d.z - S3d.z) * 0.4 // Dampened Z coordinate (Stage 3: 0.4x)
   );
   if (vUserElbow.lengthSq() < 1e-6) vUserElbow.set(isLeft ? 0.3 : -0.3, -0.7, -0.2);
 
@@ -2014,6 +2018,21 @@ document.getElementById('input-hand-sens')?.addEventListener('input', (e) => {
   settings.handSens = val / 10;
   document.getElementById('val-hand-sens')!.textContent = `${(val / 10).toFixed(1)}x`;
 });
+
+const inputReachMult = document.getElementById('input-reach-mult') as HTMLInputElement | null;
+const valReachMult = document.getElementById('val-reach-mult');
+if (inputReachMult && valReachMult) {
+  inputReachMult.value = Math.round(settings.reachMultiplier * 100).toString();
+  valReachMult.textContent = settings.reachMultiplier.toFixed(2) + "x";
+  inputReachMult.addEventListener('input', (e) => {
+    const val = Number((e.target as HTMLInputElement).value) / 100;
+    settings.reachMultiplier = val;
+    valReachMult.textContent = val.toFixed(2) + "x";
+    try {
+      localStorage.setItem('vtuber_reach_multiplier', val.toString());
+    } catch (_) {}
+  });
+}
 
 document.getElementById('input-mouth-sens')?.addEventListener('input', (e) => {
   const val = Number((e.target as HTMLInputElement).value);
