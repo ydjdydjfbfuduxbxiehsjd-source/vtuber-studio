@@ -2,6 +2,7 @@
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils, VRM, type VRMHumanBoneName } from '@pixiv/three-vrm';
+import { OneEuroFilter3D } from './oneEuroFilter';
 
 // Declare globals for MediaPipe UMD scripts loaded via index.html
 declare global {
@@ -819,6 +820,21 @@ export interface FaceTouchState {
 /* ==========================================================================
    ELBOW POLE VECTOR CACHE & ANATOMICAL CONSTRAINTS (STAGE 5)
    ========================================================================== */
+
+/* ==========================================================================
+   1€ FILTERS FOR ELBOW & WRIST POSITIONS (STAGE 7)
+   minCutoff: 1.2 Hz (smooth at low speeds), beta: 0.02 (zero latency at fast speed)
+   ========================================================================== */
+export const elbowFilters = {
+  left: new OneEuroFilter3D(1.2, 0.02, 1.0),
+  right: new OneEuroFilter3D(1.2, 0.02, 1.0),
+};
+
+export const wristFilters = {
+  left: new OneEuroFilter3D(1.2, 0.02, 1.0),
+  right: new OneEuroFilter3D(1.2, 0.02, 1.0),
+};
+
 export const lastGoodElbowVec: { left: THREE.Vector3; right: THREE.Vector3 } = {
   left: new THREE.Vector3(0.35, -0.75, -0.2).normalize(),
   right: new THREE.Vector3(-0.35, -0.75, -0.2).normalize(),
@@ -1673,22 +1689,30 @@ function onHolisticResults(results: any) {
       const w15 = getValidPoseLandmark(15, pl, wl);
       const w16 = getValidPoseLandmark(16, pl, wl);
 
-      // User Right Arm
+      // User Right Arm (Filtered with 1€ Filter)
       if (settings.rightHand && isRightActive) {
-        solveArmVectorIK(targetRightArm, s12, e14, w16, activeRightHandLM, true, results.faceLandmarks, armScale, pl[12]?.visibility ?? 1.0, pl[14]?.visibility ?? 1.0);
+        const filteredE14 = elbowFilters.right.filter(e14, now);
+        const filteredW16 = wristFilters.right.filter(w16, now);
+        solveArmVectorIK(targetRightArm, s12, filteredE14, filteredW16, activeRightHandLM, true, results.faceLandmarks, armScale, pl[12]?.visibility ?? 1.0, pl[14]?.visibility ?? 1.0);
         updateHandBadge(rightHandBadge, true);
       } else {
         lastValidRightHandLM = null;
+        elbowFilters.right.reset();
+        wristFilters.right.reset();
         resetEntireArmToIdle(targetRightArm);
         updateHandBadge(rightHandBadge, false);
       }
 
-      // User Left Arm
+      // User Left Arm (Filtered with 1€ Filter)
       if (settings.leftHand && isLeftActive) {
-        solveArmVectorIK(targetLeftArm, s11, e13, w15, activeLeftHandLM, false, results.faceLandmarks, armScale, pl[11]?.visibility ?? 1.0, pl[13]?.visibility ?? 1.0);
+        const filteredE13 = elbowFilters.left.filter(e13, now);
+        const filteredW15 = wristFilters.left.filter(w15, now);
+        solveArmVectorIK(targetLeftArm, s11, filteredE13, filteredW15, activeLeftHandLM, false, results.faceLandmarks, armScale, pl[11]?.visibility ?? 1.0, pl[13]?.visibility ?? 1.0);
         updateHandBadge(leftHandBadge, true);
       } else {
         lastValidLeftHandLM = null;
+        elbowFilters.left.reset();
+        wristFilters.left.reset();
         resetEntireArmToIdle(targetLeftArm);
         updateHandBadge(leftHandBadge, false);
       }
