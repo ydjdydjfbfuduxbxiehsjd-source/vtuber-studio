@@ -1,0 +1,41 @@
+{
+  "name": "vtuber-studio-pro-desktop",
+  "productName": "VTuber Studio Pro",
+  "version": "1.2.4",
+  "description": "Автономная Windows-оболочка для веб-интерфейса VTuber Studio Pro",
+  "author": "VTuber Studio Pro",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "prebuild:portable": "node node_modules/electron/install.js",
+    "build:portable": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.vtuberstudio.pro",
+    "productName": "VTuber Studio Pro",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release-exe"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "VTuber-Studio-Pro-${version}-Portable.${ext}"
+    }
+  }
+}

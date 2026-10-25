@@ -13,15 +13,15 @@ describe('Modern Arm Rig - Coordinate Conversion (Stage 1 & 7)', () => {
     // MediaPipe: shoulder at (0.2, -0.45, -0.1) [Y is negative upwards, Z is negative towards camera]
     const raw: Landmark3D = { x: 0.2, y: -0.45, z: -0.1 };
 
-    // In mirrored mode: X stays 0.2, Y becomes +0.45, Z becomes +0.1
+    // In mirrored mode, horizontal position is reflected into avatar camera space.
     const avatarPt = convertPoseWorldLandmark(raw, true);
-    expect(avatarPt.x).toBeCloseTo(0.2, 4);
+    expect(avatarPt.x).toBeCloseTo(-0.2, 4);
     expect(avatarPt.y).toBeCloseTo(0.45, 4);
     expect(avatarPt.z).toBeCloseTo(0.1, 4);
 
-    // In non-mirrored mode: X is flipped
+    // In non-mirrored mode: preserve the camera-space horizontal direction.
     const unmirroredPt = convertPoseWorldLandmark(raw, false);
-    expect(unmirroredPt.x).toBeCloseTo(-0.2, 4);
+    expect(unmirroredPt.x).toBeCloseTo(0.2, 4);
     expect(unmirroredPt.y).toBeCloseTo(0.45, 4);
     expect(unmirroredPt.z).toBeCloseTo(0.1, 4);
   });

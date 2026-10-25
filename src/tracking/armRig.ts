@@ -1,7 +1,7 @@
 ﻿/**
  * VTuber Studio Pro - Modern Forward Kinematics (FK) Arm & Hand Rig
- * Pure angle and direction-based skeletal tracking.
- * Zero IK singularities, zero scale explosions, zero allocations in update loop.
+ * Reach-clamped two-bone arm solving with model-specific rest-pose calibration.
+ * Landmark distances are scaled to the avatar so tracked wrists land near their image targets.
  */
 import * as THREE from 'three';
 import { VRM, type VRMHumanBoneName } from '@pixiv/three-vrm';
@@ -45,10 +45,10 @@ export interface ArmDebugInfo {
    ========================================================================== */
 
 /**
- * Converts a MediaPipe World Landmark to Three.js avatar coordinates.
- * - MediaPipe: origin at hips, +Y down, +X subject-left (-X subject-right), -Z towards camera.
- * - Three.js VRM: +Y up, +X avatar-left (-X avatar-right), +Z forward towards camera.
- * - In mirror mode (selfie camera): user right arm maps to avatar right arm (-X).
+ * Converts metric MediaPipe pose coordinates to the avatar's camera-facing frame.
+ * MediaPipe world landmarks are hip-centered; Three.js uses +Y up and +Z toward camera.
+ * Horizontal reflection follows the visible webcam mode; semantic side mapping is handled
+ * separately by the caller.
  */
 export function convertPoseWorldLandmark(
   raw: Landmark3D,
@@ -63,13 +63,35 @@ export function convertPoseWorldLandmark(
   // MediaPipe Y is inverted (+Y down -> avatar +Y up)
   const avatarY = (-ry) || 0;
 
-  // Mirror: user right (negative x) -> avatar right (negative x)
-  const avatarX = (mirror ? rx : -rx) || 0;
+  // Reflect X only when the webcam preview is mirrored; rig-side mapping is separate.
+  const avatarX = (mirror ? -rx : rx) || 0;
 
   // MediaPipe Z (depth towards camera is negative in MediaPipe world) -> avatar +Z
   const avatarZ = (-rz) || 0;
 
   out.set(avatarX, avatarY, avatarZ);
+  return out;
+}
+
+/**
+ * Converts normalized Holistic hand landmarks to isotropic camera-space coordinates.
+ * x and z use image-width units while y uses image-height units, so scale x/z by aspect.
+ */
+export function convertImageHandLandmark(
+  raw: Landmark3D,
+  mirror: boolean,
+  aspect = 4 / 3,
+  targetOut?: Landmark3D
+): Landmark3D {
+  const out = targetOut || { x: 0, y: 0, z: 0 };
+  const safeAspect = Number.isFinite(aspect) ? THREE.MathUtils.clamp(aspect, 0.25, 4) : 4 / 3;
+  const rx = Number.isFinite(raw.x) ? raw.x : 0;
+  const ry = Number.isFinite(raw.y) ? raw.y : 0;
+  const rz = Number.isFinite(raw.z) ? raw.z : 0;
+  out.x = (mirror ? -rx : rx) * safeAspect;
+  out.y = -ry;
+  out.z = -rz * safeAspect;
+  if (raw.visibility !== undefined) out.visibility = raw.visibility;
   return out;
 }
 
@@ -83,6 +105,21 @@ export interface FingerAngles {
   distalBend: number;      // 0 to 80 deg (rad)
   spread: number;          // -15 to +15 deg (rad)
 }
+
+const FINGER_DEFS: { name: string; indices: [number, number, number, number] }[] = [
+  { name: 'Index', indices: [5, 6, 7, 8] },
+  { name: 'Middle', indices: [9, 10, 11, 12] },
+  { name: 'Ring', indices: [13, 14, 15, 16] },
+  { name: 'Little', indices: [17, 18, 19, 20] },
+];
+
+const FINGER_BONE_NAMES = [
+  'ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal',
+  'IndexProximal', 'IndexIntermediate', 'IndexDistal',
+  'MiddleProximal', 'MiddleIntermediate', 'MiddleDistal',
+  'RingProximal', 'RingIntermediate', 'RingDistal',
+  'LittleProximal', 'LittleIntermediate', 'LittleDistal',
+];
 
 /**
  * Computes bending angles between consecutive finger segments.
@@ -189,9 +226,20 @@ export class ArmRig {
   private lastGoodElbow = new THREE.Vector3();
   private lastGoodWrist = new THREE.Vector3();
 
-  // Model Rest Directions: in VRM 1.0 humanoid T-pose, Left is (+1, 0, 0), Right is (-1, 0, 0)
+  // Capture each model's actual bind pose; VRM assets can use different local axes.
   public restUpperArmDir = new THREE.Vector3();
   public restLowerArmDir = new THREE.Vector3();
+  private restUpperLocalDir = new THREE.Vector3();
+  private restLowerLocalDir = new THREE.Vector3();
+  private restUpperLocalQ = new THREE.Quaternion();
+  private restLowerLocalQ = new THREE.Quaternion();
+  private restHandLocalQ = new THREE.Quaternion();
+  private restUpperWorldQ = new THREE.Quaternion();
+  private restLowerWorldQ = new THREE.Quaternion();
+  private upperSegmentLength = 0.225;
+  private lowerSegmentLength = 0.218;
+  private fingerRestQ = new Map<string, THREE.Quaternion>();
+  private fingerCurlAxes = new Map<string, THREE.Vector3>();
   private isRestComputed = false;
 
   // Cached Quaternions for smoothing
@@ -204,19 +252,21 @@ export class ArmRig {
   private idleLowerEuler = new THREE.Euler();
   private idleHandEuler = new THREE.Euler();
 
-  // Scratch memory (strictly zero allocations during update)
+  // Reused vectors and quaternions for the tracking loop
   private _sWorld = new THREE.Vector3();
   private _eWorld = new THREE.Vector3();
   private _wWorld = new THREE.Vector3();
   private _dirUpperWorld = new THREE.Vector3();
   private _dirLowerWorld = new THREE.Vector3();
-  private _dirUpperLocal = new THREE.Vector3();
-  private _dirLowerLocal = new THREE.Vector3();
+  private _reachDirection = new THREE.Vector3();
+  private _elbowPole = new THREE.Vector3();
+  private _elbowTargetWorld = new THREE.Vector3();
+  private _targetWristWorld = new THREE.Vector3();
   private _parentWorldQ = new THREE.Quaternion();
   private _parentInvQ = new THREE.Quaternion();
   private _upperWorldQ = new THREE.Quaternion();
   private _upperInvQ = new THREE.Quaternion();
-      private _targetUpperQ = new THREE.Quaternion();
+  private _targetUpperQ = new THREE.Quaternion();
   private _targetLowerQ = new THREE.Quaternion();
   private _targetHandQ = new THREE.Quaternion();
   private _palmForward = new THREE.Vector3();
@@ -228,10 +278,20 @@ export class ArmRig {
   private _palmRotMatrix = new THREE.Matrix4();
   private _scratchQ1 = new THREE.Quaternion();
   private _scratchQ2 = new THREE.Quaternion();
+  private _fingerCurlQ = new THREE.Quaternion();
+  private _fingerSpreadQ = new THREE.Quaternion();
+  private _fingerSpreadAxis = new THREE.Vector3(0, 1, 0);
+  private _fingerTargetQ = new THREE.Quaternion();
+  private _fingerAxis = new THREE.Vector3();
+  private _identityQ = new THREE.Quaternion();
   private _scratchV1 = new THREE.Vector3();
   private _p0World = new THREE.Vector3();
   private _p5World = new THREE.Vector3();
   private _p17World = new THREE.Vector3();
+  private _trackingHandLandmarks: Landmark3D[] = Array.from(
+    { length: 21 },
+    () => ({ x: 0, y: 0, z: 0 })
+  );
   private _avatarShoulderPos = new THREE.Vector3();
 
   // Debug data
@@ -283,18 +343,60 @@ export class ArmRig {
   }
 
   /**
-   * Initializes rest directions for the VRM model.
-   * Fixed to VRM normalized specification (+X left, -X right).
+   * Captures the model-specific bind pose before live tracking starts.
    */
   public initFromVRM(vrm: VRM) {
     if (!vrm.humanoid) return;
-    this.restUpperArmDir.set(this.isLeft ? 1 : -1, 0, 0);
-    this.restLowerArmDir.set(this.isLeft ? 1 : -1, 0, 0);
+    const upper = vrm.humanoid.getNormalizedBoneNode((this.side + 'UpperArm') as VRMHumanBoneName);
+    const lower = vrm.humanoid.getNormalizedBoneNode((this.side + 'LowerArm') as VRMHumanBoneName);
+    const hand = vrm.humanoid.getNormalizedBoneNode((this.side + 'Hand') as VRMHumanBoneName);
+    if (!upper || !lower || !hand) return;
+    upper.updateWorldMatrix(true, true);
+    this.restUpperLocalQ.copy(upper.quaternion);
+    this.restLowerLocalQ.copy(lower.quaternion);
+    this.restHandLocalQ.copy(hand.quaternion);
+    this.fingerRestQ.clear();
+    this.fingerCurlAxes.clear();
+    for (const fingerName of FINGER_BONE_NAMES) {
+      const fingerNode = vrm.humanoid.getNormalizedBoneNode((this.side + fingerName) as VRMHumanBoneName);
+      if (fingerNode) this.fingerRestQ.set(fingerName, fingerNode.quaternion.clone());
+    }
+
+    // Thumb curl is a rotation in the palm plane. Derive its local axis from
+    // this model's bind pose instead of assuming thumb bones share finger axes.
+    const thumbDirection = new THREE.Vector3(0, 0, 1);
+    const fingerDirection = new THREE.Vector3(this.isLeft ? 1 : -1, 0, 0);
+    const thumbFlexAxisWorld = new THREE.Vector3()
+      .crossVectors(thumbDirection, fingerDirection)
+      .normalize()
+      .applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()))
+      .normalize();
+    for (const fingerName of ['ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal']) {
+      const fingerNode = vrm.humanoid.getNormalizedBoneNode((this.side + fingerName) as VRMHumanBoneName);
+      if (!fingerNode) continue;
+      const nodeRestWorldQ = fingerNode.getWorldQuaternion(new THREE.Quaternion());
+      const localCurlAxis = thumbFlexAxisWorld.clone()
+        .applyQuaternion(nodeRestWorldQ.invert())
+        .normalize();
+      this.fingerCurlAxes.set(fingerName, localCurlAxis);
+    }
+    upper.getWorldQuaternion(this.restUpperWorldQ);
+    lower.getWorldQuaternion(this.restLowerWorldQ);
+    const upperWorldPos = upper.getWorldPosition(new THREE.Vector3());
+    const lowerWorldPos = lower.getWorldPosition(new THREE.Vector3());
+    const handWorldPos = hand.getWorldPosition(new THREE.Vector3());
+    this.upperSegmentLength = Math.max(0.05, upperWorldPos.distanceTo(lowerWorldPos));
+    this.lowerSegmentLength = Math.max(0.05, lowerWorldPos.distanceTo(handWorldPos));
+    this.restUpperLocalDir.copy(lower.position).normalize();
+    this.restLowerLocalDir.copy(hand.position).normalize();
+    if (this.restUpperLocalDir.lengthSq() < 1e-5 || this.restLowerLocalDir.lengthSq() < 1e-5) return;
+    this.restUpperArmDir.copy(this.restUpperLocalDir).applyQuaternion(this.restUpperWorldQ).normalize();
+    this.restLowerArmDir.copy(this.restLowerLocalDir).applyQuaternion(this.restLowerWorldQ).normalize();
     this.isRestComputed = true;
   }
 
   /**
-   * Main Frame Update (FK & Hand Rig)
+   * Main Frame Update (position IK & hand rig)
    */
   public update(
     vrm: VRM,
@@ -305,11 +407,21 @@ export class ArmRig {
     _poseFingers: Landmark3D[] | null | undefined,
     mirror: boolean,
     now: number,
-    handSens: number = 1.0
+    handSens: number = 1.0,
+    handAspect: number = 4 / 3,
+    armScale: number = 1.0
   ) {
     if (!vrm.humanoid) return;
     if (!this.isRestComputed) {
       this.initFromVRM(vrm);
+    }
+
+    let trackingHandLandmarks: Landmark3D[] | null = null;
+    if (handLandmarks?.length === 21) {
+      for (let i = 0; i < 21; i++) {
+        convertImageHandLandmark(handLandmarks[i], mirror, handAspect, this._trackingHandLandmarks[i]);
+      }
+      trackingHandLandmarks = this._trackingHandLandmarks;
     }
 
     const sVis = rawShoulder?.visibility ?? 0;
@@ -329,7 +441,9 @@ export class ArmRig {
     // =========================================================================
     // STAGE 5: STATE MACHINE (ACTIVE -> HOLD -> RELAX -> REST)
     // =========================================================================
-    const dt = this.lastFrameTimestamp > 0 ? Math.max(0.001, (now - this.lastFrameTimestamp) / 1000) : 0.016;
+    const dt = this.lastFrameTimestamp > 0
+      ? THREE.MathUtils.clamp((now - this.lastFrameTimestamp) / 1000, 0.001, 0.1)
+      : 0.016;
     this.lastFrameTimestamp = now;
 
     if (isDetectionValid) {
@@ -379,7 +493,7 @@ export class ArmRig {
     }
 
     // =========================================================================
-    // STAGE 2: UPPER ARM & LOWER ARM FK (DIRECTION VECTORS)
+    // STAGE 2: REACH-CLAMPED TWO-BONE POSITION IK
     // =========================================================================
 
     const upperName = (this.side + 'UpperArm') as VRMHumanBoneName;
@@ -392,42 +506,50 @@ export class ArmRig {
 
     if (!uNode || !lNode || !hNode) return;
 
-    // 1. Target Directions in Avatar World Space
-    this._dirUpperWorld.subVectors(this._eWorld, this._sWorld);
-    if (this._dirUpperWorld.lengthSq() < 1e-4) {
-      this._dirUpperWorld.copy(this.restUpperArmDir);
+    // Map the user's wrist offset from their shoulder onto the avatar's shoulder.
+    // This keeps the endpoint aligned even when the avatar and user have different arm lengths.
+    // The upper body may have been rotated earlier in this frame, so refresh the bone chain
+    // before reading the shoulder's world position.
+    uNode.updateWorldMatrix(true, false);
+    uNode.getWorldPosition(this._avatarShoulderPos);
+    const safeArmScale = Number.isFinite(armScale) ? THREE.MathUtils.clamp(armScale, 0.5, 2.0) : 1.0;
+    this._reachDirection.subVectors(this._wWorld, this._sWorld);
+    const requestedReach = this._reachDirection.length() * safeArmScale;
+    if (this._reachDirection.lengthSq() < 1e-6) {
+      this._reachDirection.copy(this.restUpperArmDir);
     } else {
-      this._dirUpperWorld.normalize();
+      this._reachDirection.normalize();
     }
 
-    this._dirLowerWorld.subVectors(this._wWorld, this._eWorld);
-    if (this._dirLowerWorld.lengthSq() < 1e-4) {
-      this._dirLowerWorld.copy(this.restLowerArmDir);
-    } else {
-      this._dirLowerWorld.normalize();
-    }
+    const reachMax = (this.upperSegmentLength + this.lowerSegmentLength) * 0.985;
+    const reachMin = Math.min(reachMax, Math.abs(this.upperSegmentLength - this.lowerSegmentLength) + 0.01);
+    const reach = THREE.MathUtils.clamp(requestedReach, reachMin, reachMax);
+    this._targetWristWorld.copy(this._avatarShoulderPos).addScaledVector(this._reachDirection, reach);
 
-    // Anatomical Elbow Hinge Angle (0 to 180 degrees)
-    // Dot product between upper arm direction and lower arm direction
+    // Keep the elbow on the user's observed bend plane. Project the elbow offset onto the
+    // plane perpendicular to the reach direction, then use a stable side/down fallback.
+    this._elbowPole.subVectors(this._eWorld, this._sWorld);
+    this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
+    if (this._elbowPole.lengthSq() < 1e-5) {
+      this._elbowPole.set(this.isLeft ? 1 : -1, -0.3, -0.15);
+      this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
+    }
+    if (this._elbowPole.lengthSq() < 1e-5) this._elbowPole.set(0, 0, this.isLeft ? 1 : -1);
+    this._elbowPole.normalize();
+
+    const upperLength = this.upperSegmentLength;
+    const lowerLength = this.lowerSegmentLength;
+    const alongReach = (upperLength * upperLength - lowerLength * lowerLength + reach * reach) / (2 * reach);
+    const elbowHeight = Math.sqrt(Math.max(0, upperLength * upperLength - alongReach * alongReach));
+    this._elbowTargetWorld.copy(this._avatarShoulderPos)
+      .addScaledVector(this._reachDirection, alongReach)
+      .addScaledVector(this._elbowPole, elbowHeight);
+
+    this._dirUpperWorld.subVectors(this._elbowTargetWorld, this._avatarShoulderPos).normalize();
+    this._dirLowerWorld.subVectors(this._targetWristWorld, this._elbowTargetWorld).normalize();
+
     const dotArm = THREE.MathUtils.clamp(this._dirUpperWorld.dot(this._dirLowerWorld), -1, 1);
-    const rawElbowAngle = Math.acos(dotArm);
-    this.debugInfo.elbowAngleDeg = THREE.MathUtils.radToDeg(rawElbowAngle);
-
-    // Soft Torso Repulsion for Elbow
-    const chestNode = vrm.humanoid.getNormalizedBoneNode('chest') || vrm.humanoid.getNormalizedBoneNode('spine');
-    if (chestNode) {
-      chestNode.getWorldPosition(this._scratchV1);
-      const toElbowX = this._eWorld.x - this._scratchV1.x;
-      const toElbowZ = this._eWorld.z - this._scratchV1.z;
-      const torsoRadius = 0.14;
-      const distSq = toElbowX * toElbowX + toElbowZ * toElbowZ;
-      if (distSq < torsoRadius * torsoRadius && distSq > 1e-5) {
-        const d = Math.sqrt(distSq);
-        const push = (torsoRadius - d);
-        this._dirUpperWorld.x += (toElbowX / d) * push;
-        this._dirUpperWorld.normalize();
-      }
-    }
+    this.debugInfo.elbowAngleDeg = THREE.MathUtils.radToDeg(Math.acos(dotArm));
 
     // 2. Upper Arm Local Rotation
     // Step 2a: Update parent node world matrix to get parent's updated orientation in this frame
@@ -436,22 +558,22 @@ export class ArmRig {
       parentNode.updateWorldMatrix(true, false);
       parentNode.getWorldQuaternion(this._parentWorldQ);
       this._parentInvQ.copy(this._parentWorldQ).invert();
-      this._dirUpperLocal.copy(this._dirUpperWorld).applyQuaternion(this._parentInvQ).normalize();
     } else {
       this._parentWorldQ.identity();
       this._parentInvQ.identity();
-      this._dirUpperLocal.copy(this._dirUpperWorld);
     }
 
-    this._targetUpperQ.setFromUnitVectors(this.restUpperArmDir, this._dirUpperLocal);
+    this._targetUpperQ.setFromUnitVectors(this.restUpperArmDir, this._dirUpperWorld);
+    this._targetUpperQ.multiply(this.restUpperWorldQ);
+    this._targetUpperQ.premultiply(this._parentInvQ);
     if (!Number.isFinite(this._targetUpperQ.x)) {
       this._targetUpperQ.identity();
     }
 
     // Blend Upper Arm with Idle A-pose
-    this._scratchQ1.setFromEuler(this.idleUpperEuler);
+    this._scratchQ1.copy(this.restUpperLocalQ);
     this._targetUpperQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
-    const smoothFactor = THREE.MathUtils.lerp(0.3, 0.7, Math.min(1.0, handSens));
+    const smoothFactor = 1.0 - Math.exp(-dt * THREE.MathUtils.lerp(8, 18, THREE.MathUtils.clamp(handSens, 0, 1)));
     this.currentUpperQ.slerp(this._targetUpperQ, smoothFactor);
     uNode.quaternion.copy(this.currentUpperQ);
 
@@ -461,17 +583,17 @@ export class ArmRig {
     this._upperInvQ.copy(this._upperWorldQ).invert();
 
     // 3. Lower Arm Local Rotation
-    this._dirLowerLocal.copy(this._dirLowerWorld).applyQuaternion(this._upperInvQ).normalize();
-    this._targetLowerQ.setFromUnitVectors(this.restLowerArmDir, this._dirLowerLocal);
+    this._targetLowerQ.setFromUnitVectors(this.restLowerArmDir, this._dirLowerWorld);
+    this._targetLowerQ.multiply(this.restLowerWorldQ);
+    this._targetLowerQ.premultiply(this._upperInvQ);
     if (!Number.isFinite(this._targetLowerQ.x)) {
       this._targetLowerQ.identity();
     }
 
-    // Populate debug points directly aligned over avatar shoulder
-    uNode.getWorldPosition(this._avatarShoulderPos);
+    // Populate debug points at the actual solved avatar joints.
     this.debugInfo.trackedShoulder.copy(this._avatarShoulderPos);
-    this.debugInfo.trackedElbow.copy(this._avatarShoulderPos).addScaledVector(this._dirUpperWorld, 0.24);
-    this.debugInfo.trackedWrist.copy(this.debugInfo.trackedElbow).addScaledVector(this._dirLowerWorld, 0.22);
+    this.debugInfo.trackedElbow.copy(this._elbowTargetWorld);
+    this.debugInfo.trackedWrist.copy(this._targetWristWorld);
 
     // =========================================================================
     // STAGE 3: HAND ORIENTATION & 50% FOREARM TWIST
@@ -479,16 +601,15 @@ export class ArmRig {
 
     let hasHandOrientation = false;
 
-    if (handLandmarks && handLandmarks.length === 21) {
-      const p0 = handLandmarks[0];   // Wrist
-      const p5 = handLandmarks[5];   // Index MCP
-      const p17 = handLandmarks[17]; // Pinky MCP
+    if (trackingHandLandmarks) {
+      const p0 = trackingHandLandmarks[0];   // Wrist
+      const p5 = trackingHandLandmarks[5];   // Index MCP
+      const p17 = trackingHandLandmarks[17]; // Pinky MCP
 
       if (p0 && p5 && p17) {
-        // Convert landmarks via unified coordinate transform (Z inverted once towards camera +Z)
-        convertPoseWorldLandmark(p0, mirror, this._p0World);
-        convertPoseWorldLandmark(p5, mirror, this._p5World);
-        convertPoseWorldLandmark(p17, mirror, this._p17World);
+        this._p0World.set(p0.x, p0.y, p0.z);
+        this._p5World.set(p5.x, p5.y, p5.z);
+        this._p17World.set(p17.x, p17.y, p17.z);
 
         // Forward vector = from wrist to finger bases midpoint
         this._palmForward.set(
@@ -505,19 +626,18 @@ export class ArmRig {
           this._palmSide.normalize();
 
           // Palm normal: perpendicular to palm surface (pointing towards camera +Z when palm faces viewer)
-          // For Left hand: cross(forward, side) points +Z towards camera
-          // For Right hand: cross(side, forward) points +Z towards camera
+          // The image-space reflection reverses handedness; compensate per hand.
           if (this.isLeft) {
-            this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
-          } else {
             this._palmNormal.crossVectors(this._palmSide, this._palmForward).normalize();
+          } else {
+            this._palmNormal.crossVectors(this._palmForward, this._palmSide).normalize();
           }
 
           // Orthogonalize side vector
           if (this.isLeft) {
-            this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
-          } else {
             this._palmSide.crossVectors(this._palmForward, this._palmNormal).normalize();
+          } else {
+            this._palmSide.crossVectors(this._palmNormal, this._palmForward).normalize();
           }
 
           // In VRM 1.0 normalized humanoid rest T-pose:
@@ -549,46 +669,47 @@ export class ArmRig {
       }
     }
 
-    if (!hasHandOrientation) {
-      this._targetHandQ.identity();
-    }
+    if (hasHandOrientation) {
+      // Work with wrist motion relative to the model's captured neutral hand pose.
+      this._scratchQ1.copy(this.restHandLocalQ).invert();
+      this._scratchQ1.premultiply(this._targetHandQ);
+      const absW = Math.min(1.0, Math.abs(this._scratchQ1.w));
+      this.debugInfo.wristAngleDeg = THREE.MathUtils.radToDeg(2.0 * Math.acos(absW));
 
-    // Compute wrist angle deviation relative to lower arm before twist (0° = straight)
-    const absW = Math.min(1.0, Math.abs(this._targetHandQ.w));
-    this.debugInfo.wristAngleDeg = THREE.MathUtils.radToDeg(2.0 * Math.acos(absW));
+      this._scratchV1.copy(this.restLowerLocalDir).applyQuaternion(this._scratchQ1);
+      const flexVal = THREE.MathUtils.clamp(-this._scratchV1.y, -1, 1);
+      this.debugInfo.wristFlexDeg = THREE.MathUtils.radToDeg(Math.asin(flexVal));
+      const flexSignStr = this.debugInfo.wristFlexDeg > 0 ? '+' : '';
+      const flexArrow = this.debugInfo.wristFlexDeg > 3 ? '↑' : (this.debugInfo.wristFlexDeg < -3 ? '↓' : '•');
+      this.debugInfo.wristFlexIndicator = flexSignStr + Math.round(this.debugInfo.wristFlexDeg) + '° ' + flexArrow;
 
-    // Compute signed wrist flexion: + for palmar flexion (towards palm), - for dorsiflexion (towards dorsal)
-    // In lower arm local space, restLowerArmDir is ±X, palmar side is -Y, dorsal side is +Y
-    this._scratchV1.copy(this.restLowerArmDir).applyQuaternion(this._targetHandQ);
-    const flexVal = THREE.MathUtils.clamp(-this._scratchV1.y, -1, 1);
-    this.debugInfo.wristFlexDeg = THREE.MathUtils.radToDeg(Math.asin(flexVal));
-    const flexSignStr = this.debugInfo.wristFlexDeg > 0 ? '+' : '';
-    const flexArrow = this.debugInfo.wristFlexDeg > 3 ? '↑' : (this.debugInfo.wristFlexDeg < -3 ? '↓' : '•');
-    this.debugInfo.wristFlexIndicator = flexSignStr + Math.round(this.debugInfo.wristFlexDeg) + '° ' + flexArrow;
-
-    // Distribute 50% forearm twist
-    const boneAxis = this.restLowerArmDir;
-    const twistAngle = 2.0 * Math.atan2(
-      this._targetHandQ.x * boneAxis.x + this._targetHandQ.y * boneAxis.y + this._targetHandQ.z * boneAxis.z,
-      this._targetHandQ.w
-    );
-    if (Number.isFinite(twistAngle)) {
-      this._scratchQ1.setFromAxisAngle(boneAxis, twistAngle * 0.5);
-      this._targetLowerQ.multiply(this._scratchQ1);
-
-      this._scratchQ2.setFromAxisAngle(boneAxis, -twistAngle * 0.5);
-      this._targetHandQ.multiply(this._scratchQ2);
+      const boneAxis = this.restLowerLocalDir;
+      const twistAngle = 2.0 * Math.atan2(
+        this._scratchQ1.x * boneAxis.x + this._scratchQ1.y * boneAxis.y + this._scratchQ1.z * boneAxis.z,
+        this._scratchQ1.w
+      );
+      if (Number.isFinite(twistAngle)) {
+        this._scratchQ2.setFromAxisAngle(boneAxis, twistAngle * 0.5);
+        this._targetLowerQ.multiply(this._scratchQ2);
+        this._scratchQ2.setFromAxisAngle(boneAxis, -twistAngle * 0.5);
+        this._targetHandQ.premultiply(this._scratchQ2);
+      }
+    } else {
+      this._targetHandQ.copy(this.restHandLocalQ);
+      this.debugInfo.wristAngleDeg = 0;
+      this.debugInfo.wristFlexDeg = 0;
+      this.debugInfo.wristFlexIndicator = '0° •';
     }
 
     // Blend Lower Arm with Idle A-pose & apply smoothly
-    this._scratchQ1.setFromEuler(this.idleLowerEuler);
+    this._scratchQ1.copy(this.restLowerLocalQ);
     this._targetLowerQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
     this.currentLowerQ.slerp(this._targetLowerQ, smoothFactor);
     lNode.quaternion.copy(this.currentLowerQ);
     lNode.updateWorldMatrix(true, false);
 
     // Blend Hand with Idle & apply smoothly
-    this._scratchQ1.setFromEuler(this.idleHandEuler);
+    this._scratchQ1.copy(this.restHandLocalQ);
     this._targetHandQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
     this.currentHandQ.slerp(this._targetHandQ, smoothFactor);
     hNode.quaternion.copy(this.currentHandQ);
@@ -596,7 +717,7 @@ export class ArmRig {
     // =========================================================================
     // STAGE 4: FINGER BONES
     // =========================================================================
-    this.updateFingers(vrm, handLandmarks, dt);
+    this.updateFingers(vrm, trackingHandLandmarks, dt);
   }
 
   /**
@@ -607,14 +728,52 @@ export class ArmRig {
     const prefix = this.side; // 'left' | 'right'
 
     if (handLandmarks && handLandmarks.length === 21) {
-      const fingerDefs: { name: string; indices: [number, number, number, number] }[] = [
-        { name: 'Index', indices: [5, 6, 7, 8] },
-        { name: 'Middle', indices: [9, 10, 11, 12] },
-        { name: 'Ring', indices: [13, 14, 15, 16] },
-        { name: 'Little', indices: [17, 18, 19, 20] },
-      ];
+      const curlAlpha = 1 - Math.exp(-dt * 18);
 
-      for (const def of fingerDefs) {
+      // Compute finger spread (abduction / adduction) across the palm plane
+      const pSide = this._palmSide;
+      const pFwd = this._palmForward;
+      const hasPalmBasis = pSide.lengthSq() > 1e-4 && pFwd.lengthSq() > 1e-4;
+
+      let spreadIdx = 0;
+      let spreadRing = 0;
+      let spreadLit = 0;
+      let spreadTh = 0;
+
+      if (hasPalmBasis) {
+        const calcSpreadAngle = (mcpIdx: number, tipIdx: number) => {
+          const pM = handLandmarks[mcpIdx];
+          const pT = handLandmarks[tipIdx];
+          const vx = pT.x - pM.x;
+          const vy = pT.y - pM.y;
+          const vz = pT.z - pM.z;
+          const s = vx * pSide.x + vy * pSide.y + vz * pSide.z;
+          const f = vx * pFwd.x + vy * pFwd.y + vz * pFwd.z;
+          return Math.atan2(s, f);
+        };
+
+        const angleMid = calcSpreadAngle(9, 12);
+        const angleIdx = calcSpreadAngle(5, 8);
+        const angleRing = calcSpreadAngle(13, 16);
+        const angleLit = calcSpreadAngle(17, 20);
+        const angleTh = calcSpreadAngle(2, 4);
+
+        // Side vector points from index towards pinky:
+        // Index is negative relative to middle, ring & pinky are positive
+        const rawSpreadIdx = angleMid - angleIdx;
+        const rawSpreadRing = angleRing - angleMid;
+        const rawSpreadLit = angleLit - angleMid;
+        const rawSpreadTh = -angleTh - angleMid;
+
+        spreadIdx = THREE.MathUtils.clamp((rawSpreadIdx - 0.05) * 1.5, 0, 0.45);
+        spreadRing = THREE.MathUtils.clamp((rawSpreadRing - 0.04) * 1.5, 0, 0.35);
+        spreadLit = THREE.MathUtils.clamp((rawSpreadLit - 0.07) * 1.6, 0, 0.55);
+        spreadTh = THREE.MathUtils.clamp((rawSpreadTh - 0.35) * 1.3, 0, 0.65);
+      }
+
+      const sideFactor = this.isLeft ? 1 : -1;
+
+      for (const def of FINGER_DEFS) {
         const [i0, i1, i2, i3] = def.indices;
         const angles = computeFingerAngles(
           handLandmarks[i0],
@@ -623,18 +782,23 @@ export class ArmRig {
           handLandmarks[i3]
         );
 
-        const curlSign = this.isLeft ? 1 : -1;
-        const rotProximal = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, curlSign), angles.proximalBend * 0.6);
-        const rotIntermediate = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, curlSign), angles.intermediateBend * 0.7);
-        const rotDistal = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, curlSign), angles.distalBend * 0.7);
+        let spreadY = 0;
+        if (def.name === 'Index') spreadY = -spreadIdx * sideFactor;
+        else if (def.name === 'Ring') spreadY = spreadRing * sideFactor;
+        else if (def.name === 'Little') spreadY = spreadLit * sideFactor;
 
-        const nodeP = vrm.humanoid.getNormalizedBoneNode(`${prefix}${def.name}Proximal` as VRMHumanBoneName);
-        const nodeI = vrm.humanoid.getNormalizedBoneNode(`${prefix}${def.name}Intermediate` as VRMHumanBoneName);
-        const nodeD = vrm.humanoid.getNormalizedBoneNode(`${prefix}${def.name}Distal` as VRMHumanBoneName);
+        // Reduce spread when fingers curl into a fist
+        const curlScale = Math.max(0, 1.0 - angles.intermediateBend / 1.3);
+        const finalSpread = spreadY * curlScale;
 
-        if (nodeP) nodeP.quaternion.slerp(rotProximal, 0.4);
-        if (nodeI) nodeI.quaternion.slerp(rotIntermediate, 0.4);
-        if (nodeD) nodeD.quaternion.slerp(rotDistal, 0.4);
+        const curlSign = this.isLeft ? -1 : 1;
+        const nodeP = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Proximal') as VRMHumanBoneName);
+        const nodeI = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Intermediate') as VRMHumanBoneName);
+        const nodeD = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Distal') as VRMHumanBoneName);
+
+        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, angles.proximalBend * 0.6, curlAlpha, undefined, finalSpread);
+        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, angles.intermediateBend * 0.7, curlAlpha);
+        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, angles.distalBend * 0.7, curlAlpha);
       }
 
       // Thumb
@@ -645,37 +809,46 @@ export class ArmRig {
         handLandmarks[4]
       );
 
-      const sign = this.isLeft ? 1 : -1;
-      const rotMeta = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, sign * 0.5, sign * 0.86), thumbBends.metacarpal);
-      const rotProx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, sign), thumbBends.proximal);
-      const rotDist = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, sign), thumbBends.distal);
+      const sign = this.isLeft ? -1 : 1;
+      const nodeTM = vrm.humanoid.getNormalizedBoneNode((prefix + 'ThumbMetacarpal') as VRMHumanBoneName);
+      const nodeTP = vrm.humanoid.getNormalizedBoneNode((prefix + 'ThumbProximal') as VRMHumanBoneName);
+      const nodeTD = vrm.humanoid.getNormalizedBoneNode((prefix + 'ThumbDistal') as VRMHumanBoneName);
 
-      const nodeTM = vrm.humanoid.getNormalizedBoneNode(`${prefix}ThumbMetacarpal` as VRMHumanBoneName);
-      const nodeTP = vrm.humanoid.getNormalizedBoneNode(`${prefix}ThumbProximal` as VRMHumanBoneName);
-      const nodeTD = vrm.humanoid.getNormalizedBoneNode(`${prefix}ThumbDistal` as VRMHumanBoneName);
+      // Radial abduction: spread thumb outward when hand is open wide
+      const metaBend = thumbBends.metacarpal - spreadTh * 0.7;
+      const proxBend = thumbBends.proximal - spreadTh * 0.3;
 
-      if (nodeTM) nodeTM.quaternion.slerp(rotMeta, 0.4);
-      if (nodeTP) nodeTP.quaternion.slerp(rotProx, 0.4);
-      if (nodeTD) nodeTD.quaternion.slerp(rotDist, 0.4);
+      if (nodeTM) this.applyFingerBend(nodeTM, 'ThumbMetacarpal', sign, metaBend, curlAlpha, this.fingerCurlAxes.get('ThumbMetacarpal'));
+      if (nodeTP) this.applyFingerBend(nodeTP, 'ThumbProximal', sign, proxBend, curlAlpha, this.fingerCurlAxes.get('ThumbProximal'));
+      if (nodeTD) this.applyFingerBend(nodeTD, 'ThumbDistal', sign, thumbBends.distal, curlAlpha, this.fingerCurlAxes.get('ThumbDistal'));
     } else {
-      // Relax fingers towards neutral
-      const relaxRate = Math.min(1.0, dt * 2.5);
-      const fingerNames = [
-        'ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal',
-        'IndexProximal', 'IndexIntermediate', 'IndexDistal',
-        'MiddleProximal', 'MiddleIntermediate', 'MiddleDistal',
-        'RingProximal', 'RingIntermediate', 'RingDistal',
-        'LittleProximal', 'LittleIntermediate', 'LittleDistal'
-      ];
-
-      const identQ = new THREE.Quaternion();
-      for (const fName of fingerNames) {
-        const node = vrm.humanoid.getNormalizedBoneNode(`${prefix}${fName}` as VRMHumanBoneName);
-        if (node) {
-          node.quaternion.slerp(identQ, relaxRate);
-        }
-      }
+      // Relax fingers towards their captured model pose.
+      this.relaxFingersToRest(vrm, 1 - Math.exp(-dt * 2.5));
     }
+  }
+
+  private applyFingerBend(
+    node: THREE.Object3D,
+    fingerName: string,
+    sign: number,
+    angle: number,
+    alpha: number,
+    axisOverride?: THREE.Vector3,
+    spreadAngle: number = 0
+  ) {
+    if (axisOverride && axisOverride.lengthSq() > 1e-6) {
+      this._fingerAxis.copy(axisOverride).normalize();
+    } else {
+      this._fingerAxis.set(0, 0, sign);
+    }
+    this._fingerCurlQ.setFromAxisAngle(this._fingerAxis, angle);
+    if (Math.abs(spreadAngle) > 1e-4) {
+      this._fingerSpreadQ.setFromAxisAngle(this._fingerSpreadAxis, spreadAngle);
+      this._fingerCurlQ.multiply(this._fingerSpreadQ);
+    }
+    const restQ = this.fingerRestQ.get(fingerName) || this._identityQ;
+    this._fingerTargetQ.multiplyQuaternions(restQ, this._fingerCurlQ);
+    node.quaternion.slerp(this._fingerTargetQ, alpha);
   }
 
   /**
@@ -687,17 +860,17 @@ export class ArmRig {
     const lNode = vrm.humanoid.getNormalizedBoneNode((this.side + 'LowerArm') as VRMHumanBoneName);
     const hNode = vrm.humanoid.getNormalizedBoneNode((this.side + 'Hand') as VRMHumanBoneName);
 
-    this._scratchQ1.setFromEuler(this.idleUpperEuler);
-    this._scratchQ2.setFromEuler(this.idleLowerEuler);
-    const identQ = new THREE.Quaternion();
+    this._scratchQ1.copy(this.restUpperLocalQ);
+    this._scratchQ2.copy(this.restLowerLocalQ);
 
     this.currentUpperQ.slerp(this._scratchQ1, rate);
     this.currentLowerQ.slerp(this._scratchQ2, rate);
-    this.currentHandQ.slerp(identQ, rate);
+    this.currentHandQ.slerp(this.restHandLocalQ, rate);
 
     if (uNode) uNode.quaternion.copy(this.currentUpperQ);
     if (lNode) lNode.quaternion.copy(this.currentLowerQ);
     if (hNode) hNode.quaternion.copy(this.currentHandQ);
+    this.relaxFingersToRest(vrm, rate);
 
     this.debugInfo.elbowAngleDeg = 0;
     this.debugInfo.wristAngleDeg = 0;
@@ -708,9 +881,19 @@ export class ArmRig {
   public resetFilters() {
     this.state = 'REST';
     this.transitionAlpha = 0;
+    this.lossTimestamp = 0;
+    this.lastFrameTimestamp = 0;
     this.filterShoulder.reset();
     this.filterElbow.reset();
     this.filterWrist.reset();
+  }
+
+  private relaxFingersToRest(vrm: VRM, rate: number) {
+    if (!vrm.humanoid) return;
+    for (const fingerName of FINGER_BONE_NAMES) {
+      const node = vrm.humanoid.getNormalizedBoneNode(`${this.side}${fingerName}` as VRMHumanBoneName);
+      if (node) node.quaternion.slerp(this.fingerRestQ.get(fingerName) || this._identityQ, rate);
+    }
   }
 }
 
@@ -786,3 +969,4 @@ export class ArmDebugVisualizer {
     this.geomRight.setFromPoints(ptsR);
   }
 }
+

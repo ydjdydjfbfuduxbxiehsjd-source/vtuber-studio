@@ -223,3 +223,131 @@ if (this.isLeft) {
 ## 4. Unchanged Components & Build
 - Shoulder and elbow hinge kinematics unchanged.
 - Version: v1.2.4 build 2026-10-24 00:25.
+
+---
+
+# VTuber Studio Pro - Restore arm tracking for bundled Holistic build (v1.2.5)
+
+The hand landmark overlay continued to render, but the avatar arms stayed idle because the arm rig now requires 3D pose landmarks. The bundled `public/mediapipe/holistic.js` exports its `world_landmarks` stream using the minified result key `za`; `results.poseWorldLandmarks` is not present in that build. `src/main.ts` now accepts the current public name and the bundled/legacy aliases (`worldLandmarks`, `za`, `ea`) while still avoiding a silent fallback to 2D points.
+
+## Arm placement and facial expression tracking update
+
+- Direction-only arm solving could match limb angles but not the wrist endpoint when the avatar's proportions differed from the user's. Modern arm tracking now scales the shoulder-to-wrist offset by the measured shoulder-width ratio, solves the elbow with a projected pole vector, and clamps reach below full extension to prevent singularities.
+- Facial tracking now requests refined 478-point Holistic landmarks and uses the existing Kalidokit face solver for stable blink, brow, and A/E/I/O/U mouth estimates. These values combine with the existing gaze, smile, frown, cheek, jaw, and nose tracking and map into VRM standard or ARKit expression channels supported by the loaded model.
+- The camera toggle description now reflects the tracked eyes, brows, lips, and articulation.
+
+## Facial tracking detail and stability update
+
+- Facial features now use soft normalized response curves and per-expression attack/release smoothing, tied to the existing smoothing control. Eye aperture drives blink, wide-eye, and squint separately; mouth corners drive left/right smile and frown; the mouth tracks opening, pucker, funnel, A/E/I/O/U shapes, cheek puff/squint, nose sneer, and jaw shift.
+- Iris movement is normalized against eye width on both axes. This prevents vertical gaze sensitivity from changing as the eyelids close. Gaze and brow channels use the eye sensitivity control, while mouth and cheek channels use facial sensitivity.
+- When Holistic loses the face, tracked values fade back to neutral and raw mouth measurements are cleared, preventing the avatar from freezing in the last expression.
+
+## Webcam preview and face detection diagnostics
+
+- The webcam preview now composites the same live video element used by Holistic into the preview canvas. This keeps the camera image visible even if the browser does not paint its video layer correctly, while landmarks stay aligned with the mirrored image.
+- The preview reports when no video frame is available, when no face is detected, or when a 468/478-point face mesh is active. This makes it clear whether a missing facial response comes from the camera frame or face detection.
+
+---
+
+# Передача проекта другой нейросети — 2026-10-25
+
+## Текущий запрос пользователя
+
+Сейчас пользователь просит исправить только сгибание больших пальцев: они выглядят сломанными и сгибаются в неверном направлении. **Не переписывать всю систему костей, рук или трекинга.** Последний скриншот показал работающие камеру и лицо (`478 точек`), но был сделан до последнего изменения осей thumb, поэтому новый фикс ещё нужно проверить в браузере.
+
+Предыдущая попытка просто поменять знак оси не помогла. Текущий код вместо этого рассчитывает ось для каждой кости большого пальца из bind-позы конкретной VRM-модели. Сначала проверь именно эту версию и обе руки, прежде чем менять алгоритм снова.
+
+## Запуск и состояние проверки
+
+- Корень проекта: `C:\Projects`.
+- `npm start` запускает `server.cjs`, который раздаёт готовую папку `dist` по `http://127.0.0.1:5173/`. Это статический сервер, не Vite HMR: после правок исходников выполни `npm run build`, затем обнови открытую страницу через `Ctrl+R`.
+- Последняя сборка после thumb-правки прошла (`tsc && vite build`). Сервер отвечал `HTTP 200`.
+- Автотесты после последней thumb-правки не запускались. Не заявлять, что новая ось проверена визуально: нужно попросить пользователя посмотреть результат после перезагрузки.
+- В сборке остаётся предупреждение Vite о JS-бандле больше 500 KB; сборку оно не ломает.
+- Текущая версия в `package.json` и бейдже UI — `1.2.4`; более поздние номера в исторических заметках не означают, что версия пакета обновлена.
+
+## Карта файлов и логика
+
+### `src/tracking/armRig.ts`
+
+- Основной современный `ArmRig`, активный по умолчанию. Здесь находятся фильтры координат, состояние руки `ACTIVE/HOLD/RELAX/REST`, решение кинематики руки и прямое управление пальцами.
+- `computeFingerAngles()` считает углы четырёх пальцев; `computeThumbBends()` считает величину сгиба большого пальца по landmark-цепочке MediaPipe `1 → 2 → 3 → 4`.
+- Последняя thumb-правка: в `initFromVRM()` сохраняются оси сгиба отдельно для `ThumbMetacarpal`, `ThumbProximal` и `ThumbDistal`. Ось в системе кисти получается из нормализованных направлений thumb `+Z` и пальцев (`+X` для левой стороны, `-X` для правой), переносится в мировую bind-систему и затем в локальную систему каждой thumb-кости через обратный bind-world quaternion.
+- В `updateFingers()` величины сгиба MediaPipe применяются только к трём thumb-костям через эти оси. `applyFingerBend()` строит целевой поворот относительно сохранённого rest quaternion и сглаживает его. Остальные пальцы продолжают использовать прежние Z-оси.
+- Если сгиб всё ещё обращён, проверь фактические bind-повороты thumb-костей загруженной модели и направление суставов в камере; не переворачивай все кости/руки разом.
+
+### `src/main.ts`
+
+- Инициализирует MediaPipe Holistic и камеру; текущие параметры: `modelComplexity: 0`, `refineFaceLandmarks: true`, confidence `0.5`, запрашивается `640×480`. Инференс пропускает кадр, если предыдущий `holisticInstance.send()` ещё не завершился.
+- Принимает world-landmarks из `poseWorldLandmarks`, `worldLandmarks` и сборочных alias `za`/`ea`; не должен подменять их плоскими 2D-точками для современной кинематики.
+- Здесь же задано зеркальное сопоставление физических рук с костями модели и выбор современного/резервного режимов. `legacyArmTracking` по умолчанию `false`; обычное управление пальцами идёт через `ArmRig` из `src/tracking/armRig.ts`.
+- В файле остался старый прямой finger/thumb путь для legacy-режима. Он не использует новую bind-позовую карту `fingerCurlAxes`; проверяй, выключен ли legacy-переключатель, если пользователь не видит эффект нового фикса.
+- Система лица использует 468/478 face landmarks и Kalidokit для blink/brow/mouth hints; дополнительно считает gaze, улыбку/хмурость, открытие рта и vowel-формы, щёки, nose sneer и jaw shift. Выражения сглаживаются, а при потере лица сходят к нейтрали.
+- `drawLandmarkSkeleton()` рисует видеокадр и landmarks на PIP canvas. Индикатор показывает `Нет видеокадра`, `Лицо не найдено` или `Лицо найдено · N точек`.
+
+### `index.html` и `src/style.css`
+
+- В `index.html` обновлены подписи настроек мимики, у видео есть `autoplay`, добавлен статус лица в PIP.
+- В `src/style.css` видеослой скрыт визуально, потому что превью компонуется на `pip-overlay`; там же стили статуса `tracked/missing`.
+
+### `src/__tests__/armRig.test.ts`
+
+- Обновлены ожидания для зеркального преобразования горизонтальной координаты: в mirrored mode X меняет знак, в обычном сохраняется.
+- Набор тестов относится к координатам и кинематике руки. Отдельный визуальный тест thumb-axis не добавлен; текущий thumb-фикс компилируется, но требует ручной проверки.
+
+### Остальные изменения
+
+- `NOTES.md` содержит историю прошлых итераций и эту карту передачи.
+- Последние изменённые файлы по `git status`: `NOTES.md`, `index.html`, `src/__tests__/armRig.test.ts`, `src/main.ts`, `src/style.css`, `src/tracking/armRig.ts`.
+- `public/mediapipe`, `public/models/sample.vrm` и `src/legacy/armTrackingLegacy.ts` в последней рабочей правке не менялись.
+
+## Что проверить следующим шагом
+
+1. Открыть `http://127.0.0.1:5173/` и сделать `Ctrl+R`, чтобы загрузить свежий bundle.
+2. Убедиться, что `Legacy arm tracking` выключен.
+3. По очереди согнуть большой палец каждой руки, затем сжать кулак; сравнить движение thumb-модели с 21 hand landmark в окне камеры.
+4. Если thumb всё ещё ломается, исследовать только локальные оси и назначение landmark-углов трёх thumb-костей для реально загруженной VRM. Остальную кинематику рук не менять без отдельной просьбы пользователя.
+
+## Исторические заметки, которые не совпадают с текущим кодом
+
+В старом разделе v1.2.2 написано `refineFaceLandmarks: false` и обработка через кадр. Сейчас в `src/main.ts` стоит `refineFaceLandmarks: true`, а пропуск инференса работает через `isHolisticBusy`, без фиксированного условия «каждый второй кадр». Для текущего поведения ориентироваться на исходники и этот handoff, а старые записи читать как историю прошлой конфигурации.
+
+## Исправление направления сгибания пальцев (v1.2.5+)
+- **Проблема**: При сжатии пальцев в кулак пальцы сгибались наружу/в обратную сторону (в сторону тыльной стороны ладони / hyperextension).
+- **Причина**: В src/tracking/armRig.ts в updateFingers() знак поворота curlSign был равен 	his.isLeft ? 1 : -1, из-за чего для левой руки ось сгиба была +Z (вращение +X в сторону +Y, тыл), а для правой -Z (вращение -X в сторону +Y, тыл).
+- **Исправление**: curlSign реверсирован на 	his.isLeft ? -1 : 1. Теперь вращение направлено в сторону ладони (-Y в VRM T-pose).
+- **Сборка**: Выполнен 
+pm run build.
+
+## ?????????? ????????????? ?????????? ??????? (Finger Spread / Abduction)
+- **????????**: ?????? ??????? ??? ????????? ?????? ????????? ??????????? (?????? ??????????), ??????? ????? ?? ????????? ? ??????? (?????????? ????????).
+- **???????**:
+  - ? `src/tracking/armRig.ts` ????????? ?????????? ????? ?????????? ??????? (abduction) ???????????? ???????? ?????? ? ????????? ?????? (`_palmSide` ? `_palmForward`).
+  - ??? `Proximal` ?????? ?????????????, ??????????? ? ??????? ???????? ??????? ?????? ????????? ??? Y (??????????????? ??????).
+  - ??? ?????? ??????? ? ????? ?????????? ?????? ?????????????? ? 0 (`curlScale`), ???????????? ?????????????? ?????????????? ? ??????.
+  - ??? ???????? ?????? (`ThumbMetacarpal` ? `ThumbProximal`) ??? ????????? ?????? ????????? ???????????? ?????????? ????????? ? ???????.
+  - ?????? ?????? (`npm run build`).
+
+# Переработка интерфейса и сценария запуска — 2026-10-26
+
+## Изменения
+
+- Панель управления теперь ведёт по простому сценарию: выбрать доступный аватар → включить отслеживание → убедиться, что лицо найдено.
+- Выбор модели поднят в начало панели. Убрана фиктивная кнопка «Розовая Гяру»: в `public/models/` есть только `sample.vrm`. Можно выбрать встроенную базовую модель или загрузить свой `.vrm`.
+- Добавлен блок быстрого запуска с живыми статусами модели, камеры и обнаружения лица. Статусы меняются при загрузке VRM, запуске/остановке камеры, ошибках доступа и результатах Holistic.
+- Основные переключатели отслеживания и эмоции остаются открытыми; чувствительность, сглаживание, фон, OBS и резервный режим перенесены в закрытые группы.
+- Основная кнопка теперь называется «Запустить отслеживание» / «Остановить отслеживание», рядом есть подсказка о разрешении камеры.
+- Добавлена адаптация панели, статусов и окна веб-камеры для узких экранов.
+
+## Где смотреть
+
+- `index.html` — новый быстрый запуск, карточка доступной модели, порядок настроек и понятные подписи.
+- `src/main.ts` — обновление статусов шагов интерфейса при загрузке модели и работе трекинга; также удалён повторный вызов стартовой загрузки VRM.
+- `src/style.css` — визуальное оформление карточек, прогресса, сворачиваемых дополнительных настроек и узких экранов.
+
+## Сборка и запуск
+
+- `npm run build` завершился успешно (`tsc && vite build`). Есть только прежнее предупреждение Vite о крупном JS-бандле.
+- Страница запущена через `npm start`, адрес: `http://127.0.0.1:5173/`.
+- Проверен HTTP-ответ страницы: 200, отдаются новые HTML и bundle.
+- Автотесты не запускались.

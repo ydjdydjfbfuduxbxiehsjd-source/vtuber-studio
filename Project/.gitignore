@@ -1,0 +1,5 @@
+node_modules/
+release*/
+temp/
+builder-cache/
+/VTuber-Studio-Pro-Portable.exe
