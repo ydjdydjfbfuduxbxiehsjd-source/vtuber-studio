@@ -39,6 +39,12 @@ export interface ArmDebugInfo {
   trackedWrist: THREE.Vector3;
 }
 
+interface StabilizedFingerValue {
+  value: number;
+  pending: number;
+  pendingFrames: number;
+}
+
 /* ==========================================================================
    COORDINATE CONVERSION (STAGE 1 & 7)
    Converts MediaPipe World Landmarks (meters, origin at hips) to Avatar space.
@@ -241,6 +247,7 @@ export class ArmRig {
   private lowerSegmentLength = 0.218;
   private fingerRestQ = new Map<string, THREE.Quaternion>();
   private fingerCurlAxes = new Map<string, THREE.Vector3>();
+  private stabilizedFingerValues = new Map<string, StabilizedFingerValue>();
   private isRestComputed = false;
 
   // Cached Quaternions for smoothing
@@ -677,7 +684,9 @@ export class ArmRig {
         // Side vector: from index to pinky
         this._palmSide.subVectors(this._p17World, this._p5World);
 
-        if (this._palmForward.lengthSq() > 1e-4 && this._palmSide.lengthSq() > 1e-4) {
+        // Reject collapsed/noisy palm geometry instead of steering the wrist
+        // from a barely detected set of finger-base landmarks.
+        if (this._palmForward.lengthSq() > 0.0025 && this._palmSide.lengthSq() > 0.0004) {
           this._palmForward.normalize();
           this._palmSide.normalize();
 
@@ -754,7 +763,7 @@ export class ArmRig {
         this._targetHandQ.premultiply(this._scratchQ2);
       }
     } else {
-      this._targetHandQ.copy(this.restHandLocalQ);
+      this._targetHandQ.copy(this.currentHandQ);
       this.debugInfo.wristAngleDeg = 0;
       this.debugInfo.wristFlexDeg = 0;
       this.debugInfo.wristFlexIndicator = '0° •';
@@ -770,7 +779,8 @@ export class ArmRig {
     // Blend Hand with Idle & apply smoothly
     this._scratchQ1.copy(this.restHandLocalQ);
     this._targetHandQ.slerp(this._scratchQ1, 1.0 - this.transitionAlpha);
-    this.currentHandQ.slerp(this._targetHandQ, smoothFactor);
+    const handSmoothFactor = Math.min(smoothFactor, 1 - Math.exp(-dt * 10));
+    this.currentHandQ.slerp(this._targetHandQ, handSmoothFactor);
     hNode.quaternion.copy(this.currentHandQ);
 
     // =========================================================================
@@ -787,7 +797,7 @@ export class ArmRig {
     const prefix = this.side; // 'left' | 'right'
 
     if (handLandmarks && handLandmarks.length === 21) {
-      const curlAlpha = 1 - Math.exp(-dt * 18);
+      const curlAlpha = 1 - Math.exp(-dt * 14);
 
       // Compute finger spread (abduction / adduction) across the palm plane
       const pSide = this._palmSide;
@@ -834,6 +844,7 @@ export class ArmRig {
 
       for (const def of FINGER_DEFS) {
         const [i0, i1, i2, i3] = def.indices;
+        if (!this.hasUsableFingerLandmarks(handLandmarks, [i0, i1, i2, i3])) continue;
         const angles = computeFingerAngles(
           handLandmarks[i0],
           handLandmarks[i1],
@@ -846,21 +857,27 @@ export class ArmRig {
         else if (def.name === 'Ring') spreadY = spreadRing * sideFactor;
         else if (def.name === 'Little') spreadY = spreadLit * sideFactor;
 
+        const proximalBend = this.stabilizeFingerValue(`${def.name}.proximal`, angles.proximalBend, dt);
+        const intermediateBend = this.stabilizeFingerValue(`${def.name}.intermediate`, angles.intermediateBend, dt);
+        const distalBend = this.stabilizeFingerValue(`${def.name}.distal`, angles.distalBend, dt);
+        const stableSpread = this.stabilizeFingerValue(`${def.name}.spread`, spreadY, dt);
+
         // Reduce spread when fingers curl into a fist
-        const curlScale = Math.max(0, 1.0 - angles.intermediateBend / 1.3);
-        const finalSpread = spreadY * curlScale;
+        const curlScale = Math.max(0, 1.0 - intermediateBend / 1.3);
+        const finalSpread = stableSpread * curlScale;
 
         const curlSign = this.isLeft ? -1 : 1;
         const nodeP = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Proximal') as VRMHumanBoneName);
         const nodeI = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Intermediate') as VRMHumanBoneName);
         const nodeD = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Distal') as VRMHumanBoneName);
 
-        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, angles.proximalBend * 0.6, curlAlpha, this.fingerCurlAxes.get(def.name + 'Proximal'), finalSpread);
-        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, angles.intermediateBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Intermediate'));
-        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, angles.distalBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Distal'));
+        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, proximalBend * 0.6, curlAlpha, this.fingerCurlAxes.get(def.name + 'Proximal'), finalSpread);
+        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, intermediateBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Intermediate'));
+        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, distalBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Distal'));
       }
 
       // Thumb
+      if (!this.hasUsableFingerLandmarks(handLandmarks, [1, 2, 3, 4])) return;
       const thumbBends = computeThumbBends(
         handLandmarks[1],
         handLandmarks[2],
@@ -874,16 +891,57 @@ export class ArmRig {
       const nodeTD = vrm.humanoid.getNormalizedBoneNode((prefix + 'ThumbDistal') as VRMHumanBoneName);
 
       // Radial abduction: spread thumb outward when hand is open wide
-      const metaBend = thumbBends.metacarpal - spreadTh * 0.7;
-      const proxBend = thumbBends.proximal - spreadTh * 0.3;
+      const stableThumbSpread = this.stabilizeFingerValue('Thumb.spread', spreadTh, dt);
+      const metaBend = this.stabilizeFingerValue('Thumb.metacarpal', thumbBends.metacarpal, dt) - stableThumbSpread * 0.7;
+      const proxBend = this.stabilizeFingerValue('Thumb.proximal', thumbBends.proximal, dt) - stableThumbSpread * 0.3;
+      const distalBend = this.stabilizeFingerValue('Thumb.distal', thumbBends.distal, dt);
 
       if (nodeTM) this.applyFingerBend(nodeTM, 'ThumbMetacarpal', sign, metaBend, curlAlpha, this.fingerCurlAxes.get('ThumbMetacarpal'));
       if (nodeTP) this.applyFingerBend(nodeTP, 'ThumbProximal', sign, proxBend, curlAlpha, this.fingerCurlAxes.get('ThumbProximal'));
-      if (nodeTD) this.applyFingerBend(nodeTD, 'ThumbDistal', sign, thumbBends.distal, curlAlpha, this.fingerCurlAxes.get('ThumbDistal'));
-    } else {
-      // Relax fingers towards their captured model pose.
-      this.relaxFingersToRest(vrm, 1 - Math.exp(-dt * 2.5));
+      if (nodeTD) this.applyFingerBend(nodeTD, 'ThumbDistal', sign, distalBend, curlAlpha, this.fingerCurlAxes.get('ThumbDistal'));
     }
+    // Missing finger landmarks hold the last pose; the arm's own REST state
+    // handles the slower return to neutral after tracking has been lost.
+  }
+
+  private hasUsableFingerLandmarks(landmarks: Landmark3D[], indices: number[]) {
+    for (const index of indices) {
+      const point = landmarks[index];
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return false;
+    }
+    for (let i = 1; i < indices.length; i++) {
+      const a = landmarks[indices[i - 1]];
+      const b = landmarks[indices[i]];
+      const length = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+      if (!Number.isFinite(length) || length < 0.004 || length > 0.35) return false;
+    }
+    return true;
+  }
+
+  private stabilizeFingerValue(key: string, measured: number, dt: number) {
+    let state = this.stabilizedFingerValues.get(key);
+    if (!state) {
+      state = { value: 0, pending: 0, pendingFrames: 0 };
+      this.stabilizedFingerValues.set(key, state);
+    }
+    if (!Number.isFinite(measured)) return state.value;
+
+    // Ignore a one-frame jump. A large motion must be seen consistently in
+    // two consecutive frames before the filtered pose starts following it.
+    if (Math.abs(measured - state.value) > 0.45) {
+      if (state.pendingFrames > 0 && Math.abs(measured - state.pending) < 0.22) {
+        state.pendingFrames++;
+      } else {
+        state.pending = measured;
+        state.pendingFrames = 1;
+      }
+      if (state.pendingFrames < 2) return state.value;
+    } else {
+      state.pendingFrames = 0;
+    }
+
+    state.value += (measured - state.value) * (1 - Math.exp(-dt * 10));
+    return state.value;
   }
 
   private applyFingerBend(
