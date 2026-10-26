@@ -80,8 +80,9 @@ export function convertPoseWorldLandmark(
 }
 
 /**
- * Converts normalized Holistic hand landmarks to isotropic camera-space coordinates.
- * x and z use image-width units while y uses image-height units, so scale x/z by aspect.
+ * Converts normalized Holistic hand landmarks to camera-space coordinates.
+ * MediaPipe's monocular depth is noisy when a hand fills the webcam, so keep
+ * depth but attenuate it slightly to avoid false wrist twist and finger curl.
  */
 export function convertImageHandLandmark(
   raw: Landmark3D,
@@ -96,7 +97,7 @@ export function convertImageHandLandmark(
   const rz = Number.isFinite(raw.z) ? raw.z : 0;
   out.x = (mirror ? -rx : rx) * safeAspect;
   out.y = -ry;
-  out.z = -rz * safeAspect;
+  out.z = -rz * safeAspect * 0.65;
   if (raw.visibility !== undefined) out.visibility = raw.visibility;
   return out;
 }
@@ -727,7 +728,7 @@ export class ArmRig {
         this._p5World.set(p5.x, p5.y, p5.z);
         this._p17World.set(p17.x, p17.y, p17.z);
 
-        // Forward vector = from wrist to finger bases midpoint
+        // Forward vector = wrist to the midpoint of the finger bases.
         this._palmForward.set(
           (this._p5World.x + this._p17World.x) * 0.5 - this._p0World.x,
           (this._p5World.y + this._p17World.y) * 0.5 - this._p0World.y,
