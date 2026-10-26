@@ -268,6 +268,10 @@ export class ArmRig {
   private _dirLowerWorld = new THREE.Vector3();
   private _reachDirection = new THREE.Vector3();
   private _elbowPole = new THREE.Vector3();
+  private _measuredElbowPole = new THREE.Vector3();
+  private _lastElbowPole = new THREE.Vector3();
+  private _projectedElbowPole = new THREE.Vector3();
+  private hasLastElbowPole = false;
   private _elbowTargetWorld = new THREE.Vector3();
   private _targetWristWorld = new THREE.Vector3();
   private _parentWorldQ = new THREE.Quaternion();
@@ -359,6 +363,7 @@ export class ArmRig {
     const lower = vrm.humanoid.getNormalizedBoneNode((this.side + 'LowerArm') as VRMHumanBoneName);
     const hand = vrm.humanoid.getNormalizedBoneNode((this.side + 'Hand') as VRMHumanBoneName);
     if (!upper || !lower || !hand) return;
+    this.hasLastElbowPole = false;
     upper.updateWorldMatrix(true, true);
     this.restUpperLocalQ.copy(upper.quaternion);
     this.restLowerLocalQ.copy(lower.quaternion);
@@ -584,21 +589,52 @@ export class ArmRig {
       this._reachDirection.normalize();
     }
 
-    const reachMax = (this.upperSegmentLength + this.lowerSegmentLength) * 0.985;
+    // Avoid the straight-arm singularity where elbow direction becomes
+    // undefined and the pole can suddenly flip while the hand passes overhead.
+    const reachMax = (this.upperSegmentLength + this.lowerSegmentLength) * 0.97;
     const reachMin = Math.min(reachMax, Math.abs(this.upperSegmentLength - this.lowerSegmentLength) + 0.01);
     const reach = THREE.MathUtils.clamp(requestedReach, reachMin, reachMax);
     this._targetWristWorld.copy(this._avatarShoulderPos).addScaledVector(this._reachDirection, reach);
 
-    // Keep the elbow on the user's observed bend plane. Project the elbow offset onto the
-    // plane perpendicular to the reach direction, then use a stable side/down fallback.
+    // Keep the elbow on the user's observed bend plane. Near full extension
+    // the measured pole becomes noisy, so preserve its previous hemisphere.
     this._elbowPole.subVectors(this._eWorld, this._sWorld);
     this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
-    if (this._elbowPole.lengthSq() < 1e-5) {
-      this._elbowPole.set(this.isLeft ? 1 : -1, -0.3, -0.15);
-      this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
+    const measuredPoleValid = this._elbowPole.lengthSq() > 1e-5;
+    if (measuredPoleValid) {
+      this._elbowPole.normalize();
+      this._measuredElbowPole.copy(this._elbowPole);
     }
-    if (this._elbowPole.lengthSq() < 1e-5) this._elbowPole.set(0, 0, this.isLeft ? 1 : -1);
-    this._elbowPole.normalize();
+
+    let hasProjectedHistory = false;
+    if (this.hasLastElbowPole) {
+      this._projectedElbowPole.copy(this._lastElbowPole)
+        .addScaledVector(this._reachDirection, -this._lastElbowPole.dot(this._reachDirection));
+      hasProjectedHistory = this._projectedElbowPole.lengthSq() > 1e-5;
+      if (hasProjectedHistory) this._projectedElbowPole.normalize();
+    }
+
+    if (measuredPoleValid && hasProjectedHistory) {
+      // The elbow lies on one side of the shoulder-wrist line. A noisy sign
+      // change must not move it to the opposite solution of the IK equation.
+      if (this._measuredElbowPole.dot(this._projectedElbowPole) < 0) this._measuredElbowPole.negate();
+      const reachRatio = reach / (this.upperSegmentLength + this.lowerSegmentLength);
+      const poleAlpha = 1 - Math.exp(-dt * (reachRatio > 0.9 ? 5 : 14));
+      this._elbowPole.copy(this._projectedElbowPole).lerp(this._measuredElbowPole, poleAlpha).normalize();
+    } else if (!measuredPoleValid && hasProjectedHistory) {
+      this._elbowPole.copy(this._projectedElbowPole);
+    } else if (!measuredPoleValid) {
+      this._elbowPole.copy(this.restUpperArmDir)
+        .addScaledVector(this._reachDirection, -this.restUpperArmDir.dot(this._reachDirection));
+      if (this._elbowPole.lengthSq() < 1e-5) {
+        this._elbowPole.set(this.isLeft ? 1 : -1, -0.3, -0.15);
+        this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
+      }
+      if (this._elbowPole.lengthSq() < 1e-5) this._elbowPole.set(0, 0, this.isLeft ? 1 : -1);
+      this._elbowPole.normalize();
+    }
+    this._lastElbowPole.copy(this._elbowPole);
+    this.hasLastElbowPole = true;
 
     const upperLength = this.upperSegmentLength;
     const lowerLength = this.lowerSegmentLength;
@@ -1003,6 +1039,7 @@ export class ArmRig {
     this.filterShoulder.reset();
     this.filterElbow.reset();
     this.filterWrist.reset();
+    this.hasLastElbowPole = false;
   }
 
   private relaxFingersToRest(vrm: VRM, rate: number) {
