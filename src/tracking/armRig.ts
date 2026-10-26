@@ -234,6 +234,7 @@ export class ArmRig {
   private restUpperLocalQ = new THREE.Quaternion();
   private restLowerLocalQ = new THREE.Quaternion();
   private restHandLocalQ = new THREE.Quaternion();
+  private restHandFrameLocalQ = new THREE.Quaternion();
   private restUpperWorldQ = new THREE.Quaternion();
   private restLowerWorldQ = new THREE.Quaternion();
   private upperSegmentLength = 0.225;
@@ -371,6 +372,41 @@ export class ArmRig {
       .normalize()
       .applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion()))
       .normalize();
+    // Build a model-specific palm frame from the actual rest skeleton. This
+    // avoids assuming every VRM uses the same wrist/finger local axes.
+    const indexMcp = vrm.humanoid.getNormalizedBoneNode((this.side + 'IndexProximal') as VRMHumanBoneName);
+    const middleMcp = vrm.humanoid.getNormalizedBoneNode((this.side + 'MiddleProximal') as VRMHumanBoneName);
+    const pinkyMcp = vrm.humanoid.getNormalizedBoneNode((this.side + 'LittleProximal') as VRMHumanBoneName);
+    if (indexMcp && middleMcp && pinkyMcp) {
+      const wristPos = hand.getWorldPosition(new THREE.Vector3());
+      const forward = middleMcp.getWorldPosition(new THREE.Vector3()).sub(wristPos).normalize();
+      const across = pinkyMcp.getWorldPosition(new THREE.Vector3())
+        .sub(indexMcp.getWorldPosition(new THREE.Vector3())).normalize();
+      const normal = this.isLeft
+        ? new THREE.Vector3().crossVectors(across, forward).normalize()
+        : new THREE.Vector3().crossVectors(forward, across).normalize();
+      const worldQ = hand.getWorldQuaternion(new THREE.Quaternion());
+      const invHandQ = worldQ.clone().invert();
+      const localX = (this.isLeft ? forward : forward.clone().negate()).applyQuaternion(invHandQ).normalize();
+      const localY = normal.negate().applyQuaternion(invHandQ).normalize();
+      const localZ = new THREE.Vector3().crossVectors(localX, localY).normalize();
+      this._palmRotMatrix.makeBasis(localX, localY, localZ);
+      this.restHandFrameLocalQ.setFromRotationMatrix(this._palmRotMatrix);
+    } else {
+      this.restHandFrameLocalQ.identity();
+    }
+
+    const palmNormalWorld = new THREE.Vector3();
+    if (indexMcp && middleMcp && pinkyMcp) {
+      const wristPos = hand.getWorldPosition(new THREE.Vector3());
+      const forward = middleMcp.getWorldPosition(new THREE.Vector3()).sub(wristPos).normalize();
+      const across = pinkyMcp.getWorldPosition(new THREE.Vector3())
+        .sub(indexMcp.getWorldPosition(new THREE.Vector3())).normalize();
+      if (this.isLeft) palmNormalWorld.crossVectors(across, forward).normalize();
+      else palmNormalWorld.crossVectors(forward, across).normalize();
+    } else {
+      palmNormalWorld.set(0, -1, 0).applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    }
     for (const fingerName of ['ThumbMetacarpal', 'ThumbProximal', 'ThumbDistal']) {
       const fingerNode = vrm.humanoid.getNormalizedBoneNode((this.side + fingerName) as VRMHumanBoneName);
       if (!fingerNode) continue;
@@ -379,6 +415,26 @@ export class ArmRig {
         .applyQuaternion(nodeRestWorldQ.invert())
         .normalize();
       this.fingerCurlAxes.set(fingerName, localCurlAxis);
+    }
+    for (const fingerName of ['Index', 'Middle', 'Ring', 'Little']) {
+      const names = [`${fingerName}Proximal`, `${fingerName}Intermediate`, `${fingerName}Distal`];
+      const nodes = names.map((name) => vrm.humanoid.getNormalizedBoneNode((this.side + name) as VRMHumanBoneName));
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        if (!node) continue;
+        const segment = new THREE.Vector3();
+        if (i < 2 && nodes[i + 1]) {
+          segment.subVectors(nodes[i + 1]!.getWorldPosition(new THREE.Vector3()), node.getWorldPosition(new THREE.Vector3()));
+        } else if (nodes[i - 1]) {
+          segment.subVectors(node.getWorldPosition(new THREE.Vector3()), nodes[i - 1]!.getWorldPosition(new THREE.Vector3()));
+        } else {
+          segment.set(1, 0, 0).applyQuaternion(node.getWorldQuaternion(new THREE.Quaternion()));
+        }
+        if (segment.lengthSq() < 1e-6) continue;
+        const worldAxis = segment.normalize().cross(palmNormalWorld).normalize();
+        const localAxis = worldAxis.applyQuaternion(node.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+        this.fingerCurlAxes.set(names[i], localAxis);
+      }
     }
     upper.getWorldQuaternion(this.restUpperWorldQ);
     lower.getWorldQuaternion(this.restLowerWorldQ);
@@ -655,6 +711,10 @@ export class ArmRig {
 
           this._palmRotMatrix.makeBasis(this._colX, this._colY, this._colZ);
           this._targetHandQ.setFromRotationMatrix(this._palmRotMatrix);
+          // Retarget the measured palm frame onto this model's captured rest
+          // frame, preserving its own wrist bend and local bone orientation.
+          this._scratchQ1.copy(this.restHandFrameLocalQ).invert();
+          this._targetHandQ.multiply(this._scratchQ1);
 
           // Convert target hand world quaternion to lower arm local space
           // Note: lowerArm has orientation = parentWorldQ * targetUpperQ * targetLowerQ
@@ -671,8 +731,7 @@ export class ArmRig {
 
     if (hasHandOrientation) {
       // Work with wrist motion relative to the model's captured neutral hand pose.
-      this._scratchQ1.copy(this.restHandLocalQ).invert();
-      this._scratchQ1.premultiply(this._targetHandQ);
+      this._scratchQ1.copy(this.restHandLocalQ).invert().multiply(this._targetHandQ);
       const absW = Math.min(1.0, Math.abs(this._scratchQ1.w));
       this.debugInfo.wristAngleDeg = THREE.MathUtils.radToDeg(2.0 * Math.acos(absW));
 
@@ -796,9 +855,9 @@ export class ArmRig {
         const nodeI = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Intermediate') as VRMHumanBoneName);
         const nodeD = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Distal') as VRMHumanBoneName);
 
-        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, angles.proximalBend * 0.6, curlAlpha, undefined, finalSpread);
-        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, angles.intermediateBend * 0.7, curlAlpha);
-        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, angles.distalBend * 0.7, curlAlpha);
+        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, angles.proximalBend * 0.6, curlAlpha, this.fingerCurlAxes.get(def.name + 'Proximal'), finalSpread);
+        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, angles.intermediateBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Intermediate'));
+        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, angles.distalBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Distal'));
       }
 
       // Thumb

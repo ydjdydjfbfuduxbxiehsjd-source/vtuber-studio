@@ -82,6 +82,16 @@ const idleArmRotations = {
   rightHand: new THREE.Euler(0, 0, 0),
 };
 
+type IdleArmRotationName = keyof typeof idleArmRotations;
+
+function getIdleArmRotation(name: IdleArmRotationName): THREE.Euler {
+  const rotation = idleArmRotations[name].clone();
+  // VRM 0 models are rotated 180° around Y by three-vrm. Their local arm axes
+  // therefore need the opposite Z sign for the same camera-facing A-pose.
+  if (currentVrm?.meta?.metaVersion === '0') rotation.z *= -1;
+  return rotation;
+}
+
 /* ==========================================================================
    THREE.JS SCENE SETUP
    ========================================================================== */
@@ -181,10 +191,10 @@ function resetEntireArmToIdle(side: 'left' | 'right') {
   const rate = 0.15;
   if (side === 'left') {
     const bones: [VRMHumanBoneName, THREE.Euler][] = [
-      ['leftShoulder', idleArmRotations.leftShoulder],
-      ['leftUpperArm', idleArmRotations.leftUpperArm],
-      ['leftLowerArm', idleArmRotations.leftLowerArm],
-      ['leftHand', idleArmRotations.leftHand],
+      ['leftShoulder', getIdleArmRotation('leftShoulder')],
+      ['leftUpperArm', getIdleArmRotation('leftUpperArm')],
+      ['leftLowerArm', getIdleArmRotation('leftLowerArm')],
+      ['leftHand', getIdleArmRotation('leftHand')],
     ];
     for (const [name, targetEuler] of bones) {
       const node = currentVrm.humanoid.getNormalizedBoneNode(name);
@@ -196,10 +206,10 @@ function resetEntireArmToIdle(side: 'left' | 'right') {
     relaxFingers('left');
   } else {
     const bones: [VRMHumanBoneName, THREE.Euler][] = [
-      ['rightShoulder', idleArmRotations.rightShoulder],
-      ['rightUpperArm', idleArmRotations.rightUpperArm],
-      ['rightLowerArm', idleArmRotations.rightLowerArm],
-      ['rightHand', idleArmRotations.rightHand],
+      ['rightShoulder', getIdleArmRotation('rightShoulder')],
+      ['rightUpperArm', getIdleArmRotation('rightUpperArm')],
+      ['rightLowerArm', getIdleArmRotation('rightLowerArm')],
+      ['rightHand', getIdleArmRotation('rightHand')],
     ];
     for (const [name, targetEuler] of bones) {
       const node = currentVrm.humanoid.getNormalizedBoneNode(name);
@@ -219,14 +229,14 @@ function showEmotionToast(icon: string, title: string, desc: string) {
 function applyRestingPose() {
   if (!currentVrm || !currentVrm.humanoid) return;
   const bones = [
-    { name: 'leftShoulder' as VRMHumanBoneName, euler: idleArmRotations.leftShoulder },
-    { name: 'leftUpperArm' as VRMHumanBoneName, euler: idleArmRotations.leftUpperArm },
-    { name: 'leftLowerArm' as VRMHumanBoneName, euler: idleArmRotations.leftLowerArm },
-    { name: 'leftHand' as VRMHumanBoneName, euler: idleArmRotations.leftHand },
-    { name: 'rightShoulder' as VRMHumanBoneName, euler: idleArmRotations.rightShoulder },
-    { name: 'rightUpperArm' as VRMHumanBoneName, euler: idleArmRotations.rightUpperArm },
-    { name: 'rightLowerArm' as VRMHumanBoneName, euler: idleArmRotations.rightLowerArm },
-    { name: 'rightHand' as VRMHumanBoneName, euler: idleArmRotations.rightHand },
+    { name: 'leftShoulder' as VRMHumanBoneName, euler: getIdleArmRotation('leftShoulder') },
+    { name: 'leftUpperArm' as VRMHumanBoneName, euler: getIdleArmRotation('leftUpperArm') },
+    { name: 'leftLowerArm' as VRMHumanBoneName, euler: getIdleArmRotation('leftLowerArm') },
+    { name: 'leftHand' as VRMHumanBoneName, euler: getIdleArmRotation('leftHand') },
+    { name: 'rightShoulder' as VRMHumanBoneName, euler: getIdleArmRotation('rightShoulder') },
+    { name: 'rightUpperArm' as VRMHumanBoneName, euler: getIdleArmRotation('rightUpperArm') },
+    { name: 'rightLowerArm' as VRMHumanBoneName, euler: getIdleArmRotation('rightLowerArm') },
+    { name: 'rightHand' as VRMHumanBoneName, euler: getIdleArmRotation('rightHand') },
   ];
   for (const b of bones) {
     const node = currentVrm.humanoid.getNormalizedBoneNode(b.name);
