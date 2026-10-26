@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/screenshot_01.png" alt="VTuber Studio Pro Interface" width="760">
+  <img src="screenshots/screenshot_03.png" alt="VTuber Studio Pro Interface" width="760">
 </p>
 
 A standalone browser-based 3D virtual avatar (VTuber) studio with high-precision AI facial tracking (Apple ARKit 52 Perfect Sync), two-bone anatomical arm IK, finger tracking, and torso movement using a standard webcam!

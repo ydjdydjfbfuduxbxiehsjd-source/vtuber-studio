@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/screenshot_01.png" alt="VTuber Studio Pro Interface" width="760">
+  <img src="screenshots/screenshot_03.png" alt="VTuber Studio Pro Interface" width="760">
 </p>
 
 Автономная веб-студия для 3D-виртуальных аватаров (VTuber) с высокоточным AI-трекингом лица (Apple ARKit 52 Perfect Sync), рук, пальцев и туловища через обычную веб-камеру прямо в браузере!
