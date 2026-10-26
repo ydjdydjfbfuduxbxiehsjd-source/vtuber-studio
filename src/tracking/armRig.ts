@@ -271,6 +271,7 @@ export class ArmRig {
   private _measuredElbowPole = new THREE.Vector3();
   private _lastElbowPole = new THREE.Vector3();
   private _projectedElbowPole = new THREE.Vector3();
+  private _outwardElbowPole = new THREE.Vector3();
   private hasLastElbowPole = false;
   private _elbowTargetWorld = new THREE.Vector3();
   private _targetWristWorld = new THREE.Vector3();
@@ -596,6 +597,14 @@ export class ArmRig {
     const reach = THREE.MathUtils.clamp(requestedReach, reachMin, reachMax);
     this._targetWristWorld.copy(this._avatarShoulderPos).addScaledVector(this._reachDirection, reach);
 
+    // Project the model's anatomical outward direction onto the bend plane.
+    // This keeps the elbow outside the torso instead of accepting the mirrored
+    // (inward) solution of the two-bone IK.
+    this._outwardElbowPole.copy(this.restUpperArmDir)
+      .addScaledVector(this._reachDirection, -this.restUpperArmDir.dot(this._reachDirection));
+    const hasOutwardPole = this._outwardElbowPole.lengthSq() > 1e-5;
+    if (hasOutwardPole) this._outwardElbowPole.normalize();
+
     // Keep the elbow on the user's observed bend plane. Near full extension
     // the measured pole becomes noisy, so preserve its previous hemisphere.
     this._elbowPole.subVectors(this._eWorld, this._sWorld);
@@ -604,6 +613,9 @@ export class ArmRig {
     if (measuredPoleValid) {
       this._elbowPole.normalize();
       this._measuredElbowPole.copy(this._elbowPole);
+      if (hasOutwardPole && this._measuredElbowPole.dot(this._outwardElbowPole) < 0) {
+        this._measuredElbowPole.negate();
+      }
     }
 
     let hasProjectedHistory = false;
@@ -611,7 +623,12 @@ export class ArmRig {
       this._projectedElbowPole.copy(this._lastElbowPole)
         .addScaledVector(this._reachDirection, -this._lastElbowPole.dot(this._reachDirection));
       hasProjectedHistory = this._projectedElbowPole.lengthSq() > 1e-5;
-      if (hasProjectedHistory) this._projectedElbowPole.normalize();
+      if (hasProjectedHistory) {
+        this._projectedElbowPole.normalize();
+        if (hasOutwardPole && this._projectedElbowPole.dot(this._outwardElbowPole) < 0) {
+          this._projectedElbowPole.negate();
+        }
+      }
     }
 
     if (measuredPoleValid && hasProjectedHistory) {
@@ -624,8 +641,8 @@ export class ArmRig {
     } else if (!measuredPoleValid && hasProjectedHistory) {
       this._elbowPole.copy(this._projectedElbowPole);
     } else if (!measuredPoleValid) {
-      this._elbowPole.copy(this.restUpperArmDir)
-        .addScaledVector(this._reachDirection, -this.restUpperArmDir.dot(this._reachDirection));
+      if (hasOutwardPole) this._elbowPole.copy(this._outwardElbowPole);
+      else this._elbowPole.set(0, 0, this.isLeft ? 1 : -1);
       if (this._elbowPole.lengthSq() < 1e-5) {
         this._elbowPole.set(this.isLeft ? 1 : -1, -0.3, -0.15);
         this._elbowPole.addScaledVector(this._reachDirection, -this._elbowPole.dot(this._reachDirection));
