@@ -13,6 +13,11 @@ import { OneEuroFilter3D } from '../oneEuroFilter';
 
 export type ArmTrackingState = 'ACTIVE' | 'HOLD' | 'RELAX' | 'REST';
 
+// Brief landmark dropouts are common during movement; keep the last arm pose
+// for a full second before easing back to the model's idle pose.
+const ARM_LOSS_HOLD_MS = 1000;
+const ARM_LOSS_RELAX_MS = 400;
+
 export interface Landmark3D {
   x: number;
   y: number;
@@ -43,6 +48,10 @@ interface StabilizedFingerValue {
   value: number;
   pending: number;
   pendingFrames: number;
+}
+
+function hasFiniteCoordinates(point: Landmark3D | null | undefined): point is Landmark3D {
+  return !!point && Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z);
 }
 
 /* ==========================================================================
@@ -113,6 +122,14 @@ export interface FingerAngles {
   spread: number;          // -15 to +15 deg (rad)
 }
 
+/** q and -q describe the same rotation: splitting their twist must agree. */
+export function shortestTwistAngle(q: THREE.Quaternion, axis: THREE.Vector3): number {
+  const projection = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+  if (Math.hypot(projection, q.w) < 1e-8) return 0;
+  const angle = 2 * Math.atan2(projection, q.w);
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
 const FINGER_DEFS: { name: string; indices: [number, number, number, number] }[] = [
   { name: 'Index', indices: [5, 6, 7, 8] },
   { name: 'Middle', indices: [9, 10, 11, 12] },
@@ -136,7 +153,8 @@ export function computeFingerAngles(
   p0: Landmark3D,
   p1: Landmark3D,
   p2: Landmark3D,
-  p3: Landmark3D
+  p3: Landmark3D,
+  palmNormal?: Landmark3D
 ): FingerAngles {
   const v1x = p1.x - p0.x, v1y = p1.y - p0.y, v1z = p1.z - p0.z;
   const len1 = Math.hypot(v1x, v1y, v1z);
@@ -161,7 +179,14 @@ export function computeFingerAngles(
     distalBend = Math.acos(clampedDot);
   }
 
-  const proximalBend = Math.min(Math.PI / 2, intermediateBend * 0.85);
+  // MCP flex is elevation out of the palm plane, independent of PIP curl.
+  // In-plane finger spread must not be interpreted as bending.
+  const normalLength = palmNormal ? Math.hypot(palmNormal.x, palmNormal.y, palmNormal.z) : 0;
+  const proximalBend = palmNormal && normalLength > 1e-4 && len1 > 1e-4
+    ? Math.asin(THREE.MathUtils.clamp((
+      v1x * palmNormal.x + v1y * palmNormal.y + v1z * palmNormal.z
+    ) / (len1 * normalLength), 0, 1))
+    : Math.min(Math.PI / 2, intermediateBend * 0.85);
 
   return {
     proximalBend: THREE.MathUtils.clamp(proximalBend, 0, Math.PI * 0.5),
@@ -372,6 +397,7 @@ export class ArmRig {
     this.restHandLocalQ.copy(hand.quaternion);
     this.fingerRestQ.clear();
     this.fingerCurlAxes.clear();
+    this.stabilizedFingerValues.clear();
     for (const fingerName of FINGER_BONE_NAMES) {
       const fingerNode = vrm.humanoid.getNormalizedBoneNode((this.side + fingerName) as VRMHumanBoneName);
       if (fingerNode) this.fingerRestQ.set(fingerName, fingerNode.quaternion.clone());
@@ -393,7 +419,9 @@ export class ArmRig {
     const pinkyMcp = vrm.humanoid.getNormalizedBoneNode((this.side + 'LittleProximal') as VRMHumanBoneName);
     if (indexMcp && middleMcp && pinkyMcp) {
       const wristPos = hand.getWorldPosition(new THREE.Vector3());
-      const forward = middleMcp.getWorldPosition(new THREE.Vector3()).sub(wristPos).normalize();
+      // Use the same finger-base midpoint as the measured palm frame.
+      const forward = indexMcp.getWorldPosition(new THREE.Vector3())
+        .add(pinkyMcp.getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5).sub(wristPos).normalize();
       const across = pinkyMcp.getWorldPosition(new THREE.Vector3())
         .sub(indexMcp.getWorldPosition(new THREE.Vector3())).normalize();
       const normal = this.isLeft
@@ -482,12 +510,17 @@ export class ArmRig {
     armScale: number = 1.0
   ) {
     if (!vrm.humanoid) return;
+    // Invalid measurements represent tracking loss, never a point at origin.
+    // Reject them before conversion so they cannot contaminate filter history.
+    if (!hasFiniteCoordinates(rawShoulder)) rawShoulder = null;
+    if (!hasFiniteCoordinates(rawElbow)) rawElbow = null;
+    if (!hasFiniteCoordinates(rawWrist)) rawWrist = null;
     if (!this.isRestComputed) {
       this.initFromVRM(vrm);
     }
 
     let trackingHandLandmarks: Landmark3D[] | null = null;
-    if (handLandmarks?.length === 21) {
+    if (handLandmarks?.length === 21 && handLandmarks.every(hasFiniteCoordinates)) {
       for (let i = 0; i < 21; i++) {
         convertImageHandLandmark(handLandmarks[i], mirror, handAspect, this._trackingHandLandmarks[i]);
       }
@@ -525,11 +558,11 @@ export class ArmRig {
         this.lossTimestamp = now;
       }
       const lossDuration = now - this.lossTimestamp;
-      if (lossDuration < 250) {
+      if (lossDuration < ARM_LOSS_HOLD_MS) {
         this.state = 'HOLD';
-      } else if (lossDuration < 650) {
+      } else if (lossDuration < ARM_LOSS_HOLD_MS + ARM_LOSS_RELAX_MS) {
         this.state = 'RELAX';
-        this.transitionAlpha = Math.max(0.0, this.transitionAlpha - dt / 0.40);
+        this.transitionAlpha = Math.max(0.0, this.transitionAlpha - dt / (ARM_LOSS_RELAX_MS / 1000));
       } else {
         this.state = 'REST';
         this.transitionAlpha = 0.0;
@@ -740,7 +773,11 @@ export class ArmRig {
 
         // Reject collapsed/noisy palm geometry instead of steering the wrist
         // from a barely detected set of finger-base landmarks.
-        if (this._palmForward.lengthSq() > 0.0025 && this._palmSide.lengthSq() > 0.0004) {
+        const forwardLengthSq = this._palmForward.lengthSq();
+        const sideLengthSq = this._palmSide.lengthSq();
+        const crossLengthSq = this._scratchV1.crossVectors(this._palmForward, this._palmSide).lengthSq();
+        if (forwardLengthSq > 0.0025 && sideLengthSq > 0.0004 &&
+          crossLengthSq > 0.01 * forwardLengthSq * sideLengthSq) {
           this._palmForward.normalize();
           this._palmSide.normalize();
 
@@ -806,10 +843,7 @@ export class ArmRig {
       this.debugInfo.wristFlexIndicator = flexSignStr + Math.round(this.debugInfo.wristFlexDeg) + '° ' + flexArrow;
 
       const boneAxis = this.restLowerLocalDir;
-      const twistAngle = 2.0 * Math.atan2(
-        this._scratchQ1.x * boneAxis.x + this._scratchQ1.y * boneAxis.y + this._scratchQ1.z * boneAxis.z,
-        this._scratchQ1.w
-      );
+      const twistAngle = shortestTwistAngle(this._scratchQ1, boneAxis);
       if (Number.isFinite(twistAngle)) {
         this._scratchQ2.setFromAxisAngle(boneAxis, twistAngle * 0.5);
         this._targetLowerQ.multiply(this._scratchQ2);
@@ -840,7 +874,10 @@ export class ArmRig {
     // =========================================================================
     // STAGE 4: FINGER BONES
     // =========================================================================
-    this.updateFingers(vrm, trackingHandLandmarks, dt);
+    // An edge-on/collapsed palm cannot provide a reliable flexion plane.
+    if (!trackingHandLandmarks || hasHandOrientation) {
+      this.updateFingers(vrm, trackingHandLandmarks, dt);
+    }
   }
 
   /**
@@ -875,10 +912,12 @@ export class ArmRig {
           return Math.atan2(s, f);
         };
 
-        const angleMid = calcSpreadAngle(9, 12);
-        const angleIdx = calcSpreadAngle(5, 8);
-        const angleRing = calcSpreadAngle(13, 16);
-        const angleLit = calcSpreadAngle(17, 20);
+        // Measure abduction at MCP; curled fingertips can cross behind the
+        // knuckle and otherwise produce a false sideways jump.
+        const angleMid = calcSpreadAngle(9, 10);
+        const angleIdx = calcSpreadAngle(5, 6);
+        const angleRing = calcSpreadAngle(13, 14);
+        const angleLit = calcSpreadAngle(17, 18);
         const angleTh = calcSpreadAngle(2, 4);
 
         // Side vector points from index towards pinky:
@@ -903,7 +942,8 @@ export class ArmRig {
           handLandmarks[i0],
           handLandmarks[i1],
           handLandmarks[i2],
-          handLandmarks[i3]
+          handLandmarks[i3],
+          this._palmNormal
         );
 
         let spreadY = 0;
@@ -925,9 +965,9 @@ export class ArmRig {
         const nodeI = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Intermediate') as VRMHumanBoneName);
         const nodeD = vrm.humanoid.getNormalizedBoneNode((prefix + def.name + 'Distal') as VRMHumanBoneName);
 
-        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, proximalBend * 0.6, curlAlpha, this.fingerCurlAxes.get(def.name + 'Proximal'), finalSpread);
-        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, intermediateBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Intermediate'));
-        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, distalBend * 0.7, curlAlpha, this.fingerCurlAxes.get(def.name + 'Distal'));
+        if (nodeP) this.applyFingerBend(nodeP, def.name + 'Proximal', curlSign, proximalBend, curlAlpha, this.fingerCurlAxes.get(def.name + 'Proximal'), finalSpread);
+        if (nodeI) this.applyFingerBend(nodeI, def.name + 'Intermediate', curlSign, intermediateBend, curlAlpha, this.fingerCurlAxes.get(def.name + 'Intermediate'));
+        if (nodeD) this.applyFingerBend(nodeD, def.name + 'Distal', curlSign, distalBend, curlAlpha, this.fingerCurlAxes.get(def.name + 'Distal'));
       }
 
       // Thumb

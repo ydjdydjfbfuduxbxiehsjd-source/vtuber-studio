@@ -12,6 +12,7 @@ import { VRMLoaderPlugin, VRMUtils, VRM, type VRMHumanBoneName } from '@pixiv/th
 import { Face as KalidokitFace } from 'kalidokit';
 import { OneEuroFilter3D } from './oneEuroFilter';
 import { ArmRig, ArmDebugVisualizer } from './tracking/armRig';
+import { measureMouth, jawOpenFromRatio, mixStandardMouth, mixArkitMouth } from './tracking/mouthSignals';
 import { solveArmVectorIKLegacy } from './legacy/armTrackingLegacy';
 
 // Declare globals for MediaPipe UMD scripts loaded via index.html
@@ -37,7 +38,7 @@ interface TrackingSettings {
   headSens: number;
   handSens: number;
   mouthSens: number;
-  eyeSens: number;
+  eyeSens: number;
   armCollision: boolean;
   reachMultiplier: number;
   torso: boolean;
@@ -60,7 +61,7 @@ const settings: TrackingSettings = {
   headSens: 1.0,
   handSens: 1.0,
   mouthSens: 1.2,
-  eyeSens: 1.0,
+  eyeSens: 1.0,
   armCollision: true,
   reachMultiplier: 1.15,
   torso: true,
@@ -385,6 +386,7 @@ function loadVRM(url: string, name = 'Sample Model') {
 
       scene.add(vrm.scene);
       updateModelCapabilities();
+      resetTrackedFace();
       applyRestingPose();
       computeAvatarArmLengths();
       armRigLeft.initFromVRM(vrm);
@@ -483,6 +485,27 @@ function setFaceExpression(name: string, target: number, timestamp = performance
 
 function clearFaceExpressionFilters() {
   faceExpressionFilters.clear();
+}
+
+function setMouthExpressionGroup<K extends string>(
+  targets: Record<K, number>,
+  names: Record<K, string>,
+  constrain: (weights: Record<K, number>) => Record<K, number>,
+) {
+  const timestamp = performance.now();
+  const filtered = { ...targets };
+  const keys = Object.keys(targets) as K[];
+  for (const key of keys) {
+    setFaceExpression(names[key], targets[key], timestamp);
+    filtered[key] = faceExpressionFilters.get(names[key])!.value;
+  }
+  // Rising and falling shapes use different smoothing speeds. Constrain the
+  // actual filtered pose too, otherwise transitions can exceed target limits.
+  const pose = constrain(filtered);
+  for (const key of keys) {
+    faceExpressionFilters.set(names[key], { value: pose[key], timestamp });
+    setExpression(names[key], pose[key]);
+  }
 }
 /* ==========================================================================
    PRESET EMOTIONS SYSTEM (MANUAL)
@@ -1521,16 +1544,15 @@ function onHolisticResults(results: any) {
       }
 
       // C. Mouth, Jaw & Cheeks: independent normalized signals for speech and expression
-      const mouthH = Math.hypot(lm[13].x - lm[14].x, lm[13].y - lm[14].y);
       const mouthW = Math.hypot(lm[61].x - lm[291].x, lm[61].y - lm[291].y);
-      const mouthOpenRatio = mouthH / (mouthW > 1e-4 ? mouthW : 1);
-
-      const webcamMouthOpen = remapFaceFeature(mouthOpenRatio, 0.07, 0.34, settings.mouthSens);
+      const mouth = measureMouth(lm, videoElement.videoWidth / (videoElement.videoHeight || 1) || 1);
+      const webcamMouthOpen = isArkitModel
+        ? jawOpenFromRatio(mouth.openRatio, settings.mouthSens)
+        : remapFaceFeature(mouth.openRatio, 0.07, 0.34, settings.mouthSens);
 
       // Smile & Frown from mouth corners
-      const lipMidY = (lm[13].y + lm[14].y) / 2;
-      const cornerDeltaL = (lipMidY - lm[61].y) / (mouthW > 1e-4 ? mouthW : 1);
-      const cornerDeltaR = (lipMidY - lm[291].y) / (mouthW > 1e-4 ? mouthW : 1);
+      const cornerDeltaL = mouth.cornerLeft;
+      const cornerDeltaR = mouth.cornerRight;
 
       const smileL = remapFaceFeature(cornerDeltaL, 0.015, 0.12, settings.mouthSens);
       const smileR = remapFaceFeature(cornerDeltaR, 0.015, 0.12, settings.mouthSens);
@@ -1555,20 +1577,20 @@ function onHolisticResults(results: any) {
       const cheekPuff = (webcamMouthOpen < 0.15 ? 1 : 0.25) * remapFaceFeature(cheekDist, 0.72, 0.84, settings.mouthSens);
       const cheekSquintL = THREE.MathUtils.clamp(smileL * 0.75, 0, 1);
       const cheekSquintR = THREE.MathUtils.clamp(smileR * 0.75, 0, 1);
-      const noseSneer = THREE.MathUtils.clamp((smileL + smileR) * 0.25 + (frownL + frownR) * 0.25, 0, 1);
+      // A smile is not a nose sneer; reserve this deformation for explicit emotion.
+      const noseSneer = 0;
 
       // Jaw shift
-      const chinShiftX = (lm[152].x - lm[1].x) / (faceW > 1e-4 ? faceW : 1);
-      const jawL = remapFaceFeature(-chinShiftX, 0.015, 0.09, settings.mouthSens);
-      const jawR = remapFaceFeature(chinShiftX, 0.015, 0.09, settings.mouthSens);
+      const jawL = remapFaceFeature(-mouth.jawShift, 0.015, 0.09, settings.mouthSens);
+      const jawR = remapFaceFeature(mouth.jawShift, 0.015, 0.09, settings.mouthSens);
 
       currentWebcamMouthOpen = webcamMouthOpen;
       currentWebcamSmileL = smileL;
       currentWebcamSmileR = smileR;
       currentWebcamFrownL = frownL;
       currentWebcamFrownR = frownR;
-      currentMouthPucker = Math.max(pucker, currentFaceMouthU);
-      currentMouthFunnel = Math.max(funnel, currentFaceMouthO);
+      currentMouthPucker = pucker;
+      currentMouthFunnel = funnel;
       currentCheekPuff = cheekPuff;
       currentCheekSquintL = cheekSquintL;
       currentCheekSquintR = cheekSquintR;
@@ -1950,7 +1972,8 @@ let micStream: MediaStream | null = null;
 function applyMouthExpressions() {
   if (!currentVrm || !currentVrm.expressionManager) return;
 
-  const mouthFromWebcam = settings.mouth ? Math.max(currentWebcamMouthOpen, currentFaceMouthA) : 0;
+  const mouthFromWebcam = settings.mouth
+    ? (isArkitModel ? currentWebcamMouthOpen : Math.max(currentWebcamMouthOpen, currentFaceMouthA)) : 0;
   const mouthFromAudio = settings.micLipSync ? currentAudioMouthOpen : 0;
   const mouthFromEmotion = blendedEmotion.mouthOpen;
 
@@ -1965,48 +1988,45 @@ function applyMouthExpressions() {
     const avatarFrownL = settings.mouth ? (settings.mirror ? currentWebcamFrownR : currentWebcamFrownL) : 0;
     const avatarFrownR = settings.mouth ? (settings.mirror ? currentWebcamFrownL : currentWebcamFrownR) : 0;
 
-    if (blendedEmotion.happy > 0.05) {
-      setFaceExpression('mouthSmileLeft', Math.max(avatarSmileL, blendedEmotion.happy));
-      setFaceExpression('mouthSmileRight', Math.max(avatarSmileR, blendedEmotion.happy));
-    } else {
-      setFaceExpression('mouthSmileLeft', avatarSmileL);
-      setFaceExpression('mouthSmileRight', avatarSmileR);
-    }
-
-    if (blendedEmotion.sad > 0.05) {
-      setFaceExpression('mouthFrownLeft', Math.max(avatarFrownL, blendedEmotion.sad));
-      setFaceExpression('mouthFrownRight', Math.max(avatarFrownR, blendedEmotion.sad));
-    } else {
-      setFaceExpression('mouthFrownLeft', avatarFrownL);
-      setFaceExpression('mouthFrownRight', avatarFrownR);
-    }
-
-    setFaceExpression('mouthPucker', settings.mouth ? Math.max(currentMouthPucker, currentFaceMouthU) : 0);
-    setFaceExpression('mouthFunnel', settings.mouth ? Math.max(currentMouthFunnel, currentFaceMouthO) : 0);
-    setFaceExpression('mouthStretchLeft', settings.mouth ? currentFaceMouthI : 0);
-    setFaceExpression('mouthStretchRight', settings.mouth ? currentFaceMouthI : 0);
-    setFaceExpression('mouthDimpleLeft', avatarSmileL);
-    setFaceExpression('mouthDimpleRight', avatarSmileR);
-    setFaceExpression('cheekPuff', settings.mouth ? currentCheekPuff : 0);
+    const mouthPose = mixArkitMouth({
+      smileLeft: Math.max(avatarSmileL, blendedEmotion.happy),
+      smileRight: Math.max(avatarSmileR, blendedEmotion.happy),
+      frownLeft: Math.max(avatarFrownL, blendedEmotion.sad),
+      frownRight: Math.max(avatarFrownR, blendedEmotion.sad),
+      pucker: settings.mouth ? currentMouthPucker : 0,
+      funnel: settings.mouth ? currentMouthFunnel : 0,
+      cheekPuff: settings.mouth ? currentCheekPuff : 0,
+    });
+    setMouthExpressionGroup(mouthPose, {
+      smileLeft: 'mouthSmileLeft', smileRight: 'mouthSmileRight',
+      frownLeft: 'mouthFrownLeft', frownRight: 'mouthFrownRight',
+      pucker: 'mouthPucker', funnel: 'mouthFunnel', cheekPuff: 'cheekPuff',
+    }, mixArkitMouth);
+    // Phoneme I and smile/dimple shapes overlap on imported ARKit meshes.
+    setFaceExpression('mouthStretchLeft', 0);
+    setFaceExpression('mouthStretchRight', 0);
+    setFaceExpression('mouthDimpleLeft', 0);
+    setFaceExpression('mouthDimpleRight', 0);
     setFaceExpression('cheekSquintLeft', settings.mouth ? (settings.mirror ? currentCheekSquintR : currentCheekSquintL) : 0);
     setFaceExpression('cheekSquintRight', settings.mouth ? (settings.mirror ? currentCheekSquintL : currentCheekSquintR) : 0);
-    setFaceExpression('noseSneerLeft', settings.mouth ? currentNoseSneer : 0);
-    setFaceExpression('noseSneerRight', settings.mouth ? currentNoseSneer : 0);
+    setFaceExpression('noseSneerLeft', Math.max(settings.mouth ? currentNoseSneer : 0, blendedEmotion.angry * 0.6));
+    setFaceExpression('noseSneerRight', Math.max(settings.mouth ? currentNoseSneer : 0, blendedEmotion.angry * 0.6));
     setFaceExpression('jawLeft', settings.mouth ? (settings.mirror ? currentJawRight : currentJawLeft) : 0);
     setFaceExpression('jawRight', settings.mouth ? (settings.mirror ? currentJawLeft : currentJawRight) : 0);
   } else {
-    setFaceExpression('aa', Math.max(clampedOpen, settings.mouth ? currentFaceMouthA : 0));
-    setFaceExpression('oh', Math.max(clampedOpen * 0.35, settings.mouth ? currentFaceMouthO : 0));
-    setFaceExpression('ih', Math.max(mouthFromAudio * 0.2, settings.mouth ? currentFaceMouthI : 0));
-    setFaceExpression('ou', Math.max(clampedOpen * 0.15, settings.mouth ? currentFaceMouthU : 0));
-    setFaceExpression('ee', settings.mouth ? currentFaceMouthE : 0);
-
-    const avgSmile = (currentWebcamSmileL + currentWebcamSmileR) / 2;
-    if (blendedEmotion.happy > 0.05) {
-      setFaceExpression('happy', Math.max(blendedEmotion.happy, avgSmile));
-    } else if (settings.mouth) {
-      setFaceExpression('happy', avgSmile);
-    }
+    const avgSmile = settings.mouth ? (currentWebcamSmileL + currentWebcamSmileR) / 2 : 0;
+    const mouthWeights = mixStandardMouth({
+      aa: Math.max(clampedOpen, settings.mouth ? currentFaceMouthA : 0),
+      oh: settings.mouth ? currentFaceMouthO : 0,
+      ih: settings.mouth ? currentFaceMouthI : 0,
+      ou: settings.mouth ? currentFaceMouthU : 0,
+      ee: settings.mouth ? currentFaceMouthE : 0,
+      happy: Math.max(blendedEmotion.happy, avgSmile),
+    });
+    // A single audio amplitude describes aperture, not five simultaneous vowels.
+    setMouthExpressionGroup(mouthWeights, {
+      aa: 'aa', oh: 'oh', ih: 'ih', ou: 'ou', ee: 'ee', happy: 'happy',
+    }, mixStandardMouth);
   }
 }
 
@@ -2039,6 +2059,14 @@ function releaseFaceTracking(timestamp: number) {
   currentJawLeft = 0;
   currentJawRight = 0;
   applyMouthExpressions();
+}
+
+function resetTrackedFace() {
+  // No further camera frames are guaranteed after a stop or model switch.
+  // Clear the applied values as well as filter memory, then restore manual emotion.
+  for (const name of faceExpressionFilters.keys()) setExpression(name, 0);
+  clearFaceExpressionFilters();
+  releaseFaceTracking(performance.now());
 }
 
 let audioCtx: AudioContext | null = null;
@@ -2119,6 +2147,7 @@ cameraBtn.addEventListener('click', () => {
     initTracking();
   } else {
     isCameraRunning = false;
+    resetTrackedFace();
     if (cameraInstance) {
       try { cameraInstance.stop(); } catch (_) {}
     }
