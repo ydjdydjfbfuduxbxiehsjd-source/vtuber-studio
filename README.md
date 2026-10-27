@@ -27,10 +27,8 @@
 ## 🚀 Быстрый запуск
 
 ### Вариант 1: Для пользователей (в 1 клик, без Node.js)
-1. Перейдите в раздел **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** и скачайте архив `VTuber_Studio_Pro.zip`.
-2. Распакуйте архив в любую папку.
-3. Запустите **`start.bat`** (на Windows используется встроенный веб-сервер PowerShell).
-4. Приложение автоматически откроется в браузере по адресу `http://localhost:5173/`.
+1. Откройте **[Releases](https://github.com/ydjdydjfbfuduxbxiehsjd-source/vtuber-studio/releases)** и скачайте `VTuber-Studio-Pro-1.2.5-Portable.exe`.
+2. Запустите файл. Установка не требуется.
 
 ### Вариант 2: Для разработчиков (сборка из исходников)
 Требуется установленный **[Node.js](https://nodejs.org/) (версии 18+)** и **npm**:

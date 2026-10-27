@@ -1,6 +1,6 @@
 ﻿console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log(
-  '%c VTuber Studio PRO %c v1.2.4 build 2026-10-24 00:25 %c feature/arm-tracking-rewrite ',
+  '%c VTuber Studio PRO %c v1.2.5 build 2026-10-27 %c feature/arm-tracking-rewrite ',
   'background:#4f46e5;color:#fff;font-weight:bold;padding:3px 6px;border-radius:4px 0 0 4px;',
   'background:#10b981;color:#000;font-weight:bold;padding:3px 6px;',
   'background:#1e293b;color:#94a3b8;padding:3px 6px;border-radius:0 4px 4px 0;'
@@ -68,7 +68,7 @@ const settings: TrackingSettings = {
   torsoSens: 1.0,
   mirror: true,
   showSkeleton: true,
-  bgColor: '#161822',
+  bgColor: '#211d2b',
 };
 
 // Natural Resting / Idle Posture Rotations
@@ -103,7 +103,7 @@ const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: 'high-performance',
 });
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1179,6 +1179,7 @@ const pipFaceStatus = document.getElementById('pip-face-status')!;
 let holisticInstance: any = null;
 let cameraInstance: any = null;
 let isCameraRunning = false;
+let isCameraStarting = false;
 
 function updateHandBadge(el: HTMLElement, active: boolean) {
   if (active) {
@@ -1867,6 +1868,11 @@ function onHolisticResults(results: any) {
    INITIALIZATION & AUDIO LIP-SYNC
    ========================================================================== */
 async function initTracking() {
+  if (isCameraStarting || isCameraRunning) return;
+  isCameraStarting = true;
+  const startButton = document.getElementById('btn-start-camera') as HTMLButtonElement;
+  startButton.disabled = true;
+  try {
   if (!window.Holistic || !window.Camera) {
     camStatusText.textContent = 'Ошибка скриптов MediaPipe';
     setWorkflowStep('workflow-camera', 'error', 'Не удалось загрузить');
@@ -1881,6 +1887,10 @@ async function initTracking() {
   pipFaceStatus.textContent = 'Ожидание первого кадра';
   pipFaceStatus.classList.remove('tracked', 'missing');
 
+  if (holisticInstance) {
+    await holisticInstance.close();
+    holisticInstance = null;
+  }
   holisticInstance = new window.Holistic({
     locateFile: (file: string) => `/mediapipe/${file}`,
   });
@@ -1904,7 +1914,6 @@ async function initTracking() {
     videoElement.srcObject = null;
   }
 
-  try {
     let isHolisticBusy = false;
     cameraInstance = new window.Camera(videoElement, {
       onFrame: async () => {
@@ -1912,7 +1921,9 @@ async function initTracking() {
           isHolisticBusy = true;
           try {
             await holisticInstance.send({ image: videoElement });
-          } catch (_) {} finally {
+          } catch (error) {
+            reportTrackingFailure(error);
+          } finally {
             isHolisticBusy = false;
           }
         }
@@ -1922,6 +1933,7 @@ async function initTracking() {
     });
 
     await cameraInstance.start();
+    videoElement.style.transform = settings.mirror ? 'scaleX(-1)' : 'scaleX(1)';
     videoElement.muted = true;
     videoElement.playsInline = true;
     await videoElement.play();
@@ -1934,17 +1946,42 @@ async function initTracking() {
     btnText.textContent = 'Остановить отслеживание';
     console.log("[VTuber Studio Pro] solveArmVectorIK & OneEuroFilter loaded successfully");
 console.log('Camera and Holistic tracking started successfully.');
-  } catch (err: any) {
-    console.error('Camera start error:', err);
-    camStatusText.textContent = 'Ошибка доступа к камере';
-    setWorkflowStep('workflow-camera', 'error', 'Нет доступа');
-    setWorkflowStep('workflow-tracking', 'error', 'Трекинг остановлен');
-    pipFaceStatus.textContent = 'Ошибка камеры';
-    pipFaceStatus.classList.remove('tracked');
-    pipFaceStatus.classList.add('missing');
-    alert('Не удалось получить доступ к веб-камере. Проверьте разрешения.');
+  } catch (error) {
+    reportTrackingFailure(error, true);
+  } finally {
+    isCameraStarting = false;
+    startButton.disabled = false;
   }
 }
+
+function reportTrackingFailure(error: unknown, startingCamera = false) {
+  console.error(startingCamera ? 'Camera initialization failed:' : 'Tracking frame failed:', error);
+  const errorName = error instanceof Error || error instanceof DOMException ? error.name : '';
+  const message = errorName === 'NotAllowedError'
+    ? 'Разрешите доступ к камере в настройках браузера'
+    : errorName === 'NotReadableError'
+      ? 'Камера занята. Закройте её в других приложениях'
+      : errorName === 'NotFoundError'
+        ? 'Веб-камера не найдена'
+        : startingCamera
+          ? 'Не удалось запустить камеру или трекинг. Попробуйте снова'
+          : 'Ошибка трекинга. Попробуйте снова или выберите более лёгкую модель';
+  isCameraRunning = false;
+  if (cameraInstance) cameraInstance.stop();
+  if (videoElement.srcObject instanceof MediaStream) {
+    videoElement.srcObject.getTracks().forEach(track => track.stop());
+    videoElement.srcObject = null;
+  }
+  pipCtx.clearRect(0, 0, pipOverlay.width, pipOverlay.height);
+  camStatusText.textContent = startingCamera ? 'Ошибка запуска' : 'Трекинг остановлен';
+  pipFaceStatus.textContent = message;
+  pipFaceStatus.classList.remove('tracked');
+  pipFaceStatus.classList.add('missing');
+  setWorkflowStep('workflow-camera', 'error', 'Остановлена');
+  setWorkflowStep('workflow-tracking', 'error', 'Нужен перезапуск');
+  document.getElementById('camera-btn-text')!.textContent = 'Повторить запуск';
+}
+
 
 
 let currentWebcamMouthOpen = 0;
@@ -2406,6 +2443,8 @@ function toggleUIVisibility() {
   controlsPanel.classList.toggle('hidden', isHidden);
   pipContainer.classList.toggle('hidden', isHidden);
   restoreBtn.classList.toggle('hidden', !isHidden);
+  document.body.classList.toggle('studio-clean', isHidden);
+  resizeStudioViewport();
 }
 
 hideUiBtn.addEventListener('click', toggleUIVisibility);
@@ -2446,7 +2485,6 @@ document.getElementById('btn-minimize-pip')?.addEventListener('click', () => {
 const dropZone = document.getElementById('drop-zone')!;
 const fileInput = document.getElementById('vrm-file-input') as HTMLInputElement;
 
-dropZone.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
@@ -2476,12 +2514,28 @@ window.addEventListener('drop', (e) => {
   }
 });
 
-// Window Resize
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+// Keep the avatar centered in the stage, including clean OBS output.
+function resizeStudioViewport() {
+  const bounds = canvas.getBoundingClientRect();
+  camera.aspect = bounds.width / Math.max(1, bounds.height);
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+  renderer.setSize(bounds.width, bounds.height, false);
+}
+window.addEventListener('resize', resizeStudioViewport);
+resizeStudioViewport();
+
+const studioTabs = document.querySelectorAll<HTMLButtonElement>('[data-studio-tab]');
+studioTabs.forEach(tab => tab.addEventListener('click', () => {
+  studioTabs.forEach(button => {
+    const selected = button === tab;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+  document.querySelectorAll<HTMLElement>('[data-studio-section]').forEach(section => {
+    section.hidden = section.dataset.studioSection !== tab.dataset.studioTab;
+  });
+  document.querySelector('.panel-scroll')?.scrollTo(0, 0);
+}));
 
 /* ==========================================================================
    RENDER & ANIMATION LOOP

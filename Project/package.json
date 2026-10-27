@@ -1,7 +1,7 @@
 {
   "name": "vtuber-studio-pro-desktop",
   "productName": "VTuber Studio Pro",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Автономная Windows-оболочка для веб-интерфейса VTuber Studio Pro",
   "author": "VTuber Studio Pro",
   "private": true,

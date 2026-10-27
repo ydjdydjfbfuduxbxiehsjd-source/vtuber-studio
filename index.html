@@ -8,17 +8,18 @@
     <script src="/mediapipe/camera_utils.js"></script>
     <script src="/mediapipe/holistic.js"></script>
     <link rel="stylesheet" href="/src/style.css" />
+    <link rel="stylesheet" href="/src/studio.css" />
   </head>
-  <body>
+  <body class="studio-ui">
     <!-- 3D Canvas Viewport -->
     <canvas id="vrm-canvas"></canvas>
 
     <!-- Top Navigation Bar -->
     <header id="top-bar">
       <div class="brand">
-        <div class="logo-badge">PRO</div>
-        <h1>VTuber Studio</h1>
-        <span class="version-tag" id="app-version-badge">v1.2.4 build 2026-10-24 00:25</span>
+        <div class="logo-badge" aria-hidden="true">✦</div>
+        <h1>VTuber <span>Studio</span></h1>
+        <span class="version-tag" id="app-version-badge">v1.2.5 build 2026-10-27</span>
       </div>
 
       <div class="top-status">
@@ -47,7 +48,7 @@
         </button>
         <button id="btn-hide-ui" class="btn btn-ghost" title="Скрыть интерфейс для OBS (H)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-          Скрыть UI <kbd>H</kbd>
+          Чистый кадр <kbd>H</kbd>
         </button>
       </div>
     </header>
@@ -55,14 +56,19 @@
     <!-- Sidebar Controls -->
     <aside id="controls-panel" class="panel">
       <div class="panel-header">
-        <h2>Рабочее пространство</h2>
-        <span class="subtitle">Выберите аватар, подключите камеру — и начинайте.</span>
+        <h2>Твоя студия</h2>
+        <span class="subtitle">Всё для твоего следующего эфира.</span>
       </div>
 
+      <nav class="studio-tabs" aria-label="Настройки студии">
+        <button type="button" class="studio-tab active" data-studio-tab="avatar" aria-pressed="true">Аватар</button>
+        <button type="button" class="studio-tab" data-studio-tab="tracking" aria-pressed="false">Трекинг</button>
+        <button type="button" class="studio-tab" data-studio-tab="scene" aria-pressed="false">Сцена</button>
+      </nav>
       <div class="panel-scroll">
         <section class="workflow-card" aria-label="Быстрый запуск">
           <div class="workflow-heading">
-            <span class="workflow-kicker">БЫСТРЫЙ ЗАПУСК</span>
+            <span class="workflow-kicker">Подготовка к эфиру</span>
             <span class="workflow-hint">3 шага</span>
           </div>
           <div class="workflow-steps">
@@ -82,17 +88,17 @@
         </section>
 
         <!-- Section: VRM Model Loader -->
-        <section class="control-group model-group">
+        <section class="control-group model-group" data-studio-section="avatar">
           <div class="group-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <h3>1 · Выберите аватар</h3>
+            <h3>Твой аватар</h3>
           </div>
 
           <div class="avatar-quick-select">
             <button id="btn-load-sample" class="btn btn-secondary active-model-btn" title="Загрузить встроенный базовый VRM аватар">
-              <span class="avatar-card-icon">👤</span>
+              <span class="avatar-card-icon" aria-hidden="true">✦</span>
               <strong>Базовый VRM</strong>
-              <span class="avatar-card-meta">Встроенная модель · нажмите, чтобы загрузить</span>
+              <span class="avatar-card-meta">Встроенная модель VRM</span>
             </button>
           </div>
 
@@ -105,7 +111,7 @@
         </section>
 
         <!-- Section: Tracking Toggles -->
-        <section class="control-group">
+        <section class="control-group" data-studio-section="tracking" hidden>
           <div class="group-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/><path d="m14.83 9.17 4.24-4.24"/><path d="m14.83 14.83 4.24 4.24"/><path d="m9.17 14.83-4.24 4.24"/></svg>
             <h3>Что отслеживать</h3>
@@ -206,7 +212,7 @@
         </section>
 
         <!-- Section: Emotion Presets Palette -->
-        <section class="control-group">
+        <section class="control-group" data-studio-section="avatar">
           <div class="group-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
             <h3>Палитра эмоций</h3>
@@ -242,7 +248,7 @@
         </section>
 
         <!-- Advanced controls stay collapsed until needed -->
-        <details class="control-group advanced-group">
+        <details class="control-group advanced-group" data-studio-section="tracking" hidden>
           <summary class="group-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
             <div class="summary-copy"><h3>Точная настройка</h3><small>Чувствительность и сглаживание</small></div>
@@ -307,7 +313,7 @@
         </details>
 
         <!-- Section: Scene & Background -->
-        <details class="control-group advanced-group">
+        <details class="control-group advanced-group" data-studio-section="scene" open hidden>
           <summary class="group-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
             <div class="summary-copy"><h3>Сцена и трансляция</h3><small>Фон, OBS и запасной режим</small></div>
@@ -336,7 +342,7 @@
             </label>
           </div>
           <div class="bg-presets">
-            <button class="bg-btn active" data-bg="#161822" style="background: #161822;" title="Тёмная студия"></button>
+            <button class="bg-btn active" data-bg="#211d2b" style="background: #211d2b;" title="Тёмная студия"></button>
             <button class="bg-btn" data-bg="#00ff00" style="background: #00ff00;" title="Green Screen (Хромакей)"></button>
             <button class="bg-btn" data-bg="#0000ff" style="background: #0000ff;" title="Blue Screen"></button>
             <button class="bg-btn" data-bg="#ff00ff" style="background: #ff00ff;" title="Magenta Screen"></button>
@@ -375,6 +381,8 @@
       </div>
     </div>
 
+    <div class="stage-heading studio-chrome"><span class="stage-symbol" aria-hidden="true">✦</span><div><h2>Сцена</h2><p>Твой персонаж. Твой эфир.</p></div><span class="stage-local">Локальная студия</span></div>
+    <div class="stage-hints studio-chrome"><span>Перетащи .VRM на сцену</span><span>Мышь — поворот и масштаб</span><span><kbd>H</kbd> Чистый кадр</span></div>
     <!-- UI Restore Trigger (visible when UI is hidden) -->
     <button id="btn-restore-ui" class="floating-restore-btn hidden" title="Показать интерфейс (H)">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
